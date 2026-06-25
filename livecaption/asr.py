@@ -327,10 +327,13 @@ class OnlineStream:
     for speech onset) <=> ACTIVE (incrementally decoding one sentence).
 
     accept_waveform returns an event list with two shapes:
-      ("partial", text, speaker)   text = the whole in-progress utterance (non-empty);
+      ("partial", text, speaker, utterance_samples)
+                                   text = the whole in-progress utterance (non-empty);
                                    speaker = provisional speaker from the diar peek (None if
-                                   diarize off / still uncertain)
-      ("final", segments)          segments = [(speaker, text, diff), ...] for the WHOLE
+                                   diarize off / still uncertain); utterance_samples lets file
+                                   mode convert the event to audio-time timestamps.
+      ("final", segments, utterance_samples)
+                                   segments = [(speaker, text, diff), ...] for the WHOLE
                                    utterance in one event. When diarize splits the utterance
                                    across speakers there are multiple segments; otherwise one.
                                    speaker is the Sortformer number (None if diarize off); diff
@@ -500,6 +503,7 @@ class OnlineStream:
         )
 
         audio = np.concatenate(self._audio) if self._audio else None
+        utterance_samples = len(audio) if audio is not None else self._n_samples
         text = self._text
         tokens = self._hypothesis
         tail: np.ndarray | None = None
@@ -577,7 +581,7 @@ class OnlineStream:
         # inline [S1]/[S2] markers instead of one line per speaker (avoids a partial flickering
         # into several lines on finalization)
         segments = [(spk, seg, d) for (spk, seg), d in zip(parts, diffs, strict=True)]
-        return [("final", segments)]
+        return [("final", segments, utterance_samples)]
 
     def _second_pass(self, audio: np.ndarray, text: str, tokens: list):
         """two-pass correction: at finalization, re-decode the whole sentence with maximum
@@ -786,7 +790,7 @@ class OnlineStream:
                     self._decode_chunk(out)
 
         if not final and self._text and self._text != prev:
-            return [("partial", self._text, self._live_spk)]
+            return [("partial", self._text, self._live_spk, self._n_samples)]
         return []
 
     def _mel_grow(self, final: bool) -> mx.array:
@@ -888,6 +892,8 @@ class AsrWorker(threading.Thread):
                  to stderr). If not passed, only logging happens—but the caller should pass
                  it: a worker dying silently makes the pipeline look "alive" while no longer
                  producing captions.
+    on_done(label, samples_seen):  notify the source-audio duration consumed by the worker.
+                 File-mode callers use it for end-of-media completeness checks.
     """
 
     def __init__(
@@ -898,6 +904,8 @@ class AsrWorker(threading.Thread):
         on_partial: Callable[[str, str, datetime, int | None], None],
         on_final: Callable[[str, list, datetime], None],
         on_error: Callable[[], None] | None = None,
+        on_done: Callable[[str, int], None] | None = None,
+        use_audio_timestamps: bool = False,
     ):
         super().__init__(daemon=True, name=f"asr-{label}")
         self.recognizer = recognizer
@@ -906,6 +914,8 @@ class AsrWorker(threading.Thread):
         self.on_partial = on_partial
         self.on_final = on_final
         self.on_error = on_error
+        self.on_done = on_done
+        self.use_audio_timestamps = use_audio_timestamps
 
     def run(self) -> None:
         try:
@@ -916,26 +926,49 @@ class AsrWorker(threading.Thread):
             if self.on_error is not None:
                 self.on_error()
 
+    def _audio_timestamp(self, samples_seen: int, utterance_samples: int) -> datetime:
+        """Timestamp an utterance by source-audio position instead of wall clock.
+
+        FileSource can decode much faster than real time, so datetime.now() records when the
+        transcript was produced, not where the utterance starts in the media. Use a midnight
+        anchor so the existing render path still formats it as 00:00:xx.
+        """
+        start_sample = max(0, samples_seen - max(0, utterance_samples))
+        return datetime(2000, 1, 1) + timedelta(
+            seconds=start_sample / config.SAMPLE_RATE
+        )
+
     def _run(self) -> None:
         stream = self.recognizer.create_stream()
         last_partial = ""
         started_at: datetime | None = None
         last_final_ts: datetime | None = None
+        samples_seen = 0
         while True:
             samples = self.audio_queue.get()
-            events = (
-                stream.flush() if samples is SENTINEL else stream.accept_waveform(samples)
-            )
+            if samples is SENTINEL:
+                events = stream.flush()
+            else:
+                samples_seen += len(samples)
+                events = stream.accept_waveform(samples)
             for ev in events:
                 if ev[0] == "final":
                     segments = ev[1]
-                    ts = started_at if started_at is not None else datetime.now()
+                    utterance_samples = ev[2] if len(ev) > 2 else 0
+                    ts = started_at
+                    if ts is None:
+                        ts = (
+                            self._audio_timestamp(samples_seen, utterance_samples)
+                            if self.use_audio_timestamps
+                            else datetime.now()
+                        )
                     self.on_final(self.label, segments, ts)
                     last_final_ts = ts
                     last_partial = ""
                     started_at = None
                 else:  # ("partial", text, speaker)
-                    _, text, speaker = ev
+                    _, text, speaker, *meta = ev
+                    utterance_samples = meta[0] if meta else 0
                     if text != last_partial:
                         # the utterance's first non-empty result -> record as the start
                         # time, backdated by any carried-over audio the utterance was
@@ -944,12 +977,19 @@ class AsrWorker(threading.Thread):
                         # decode runs faster than real time, so the backdating can
                         # overshoot and make timestamps run backwards.
                         if not last_partial:
-                            started_at = datetime.now() - timedelta(
-                                seconds=stream.seed_skew_sec
-                            )
+                            if self.use_audio_timestamps:
+                                started_at = self._audio_timestamp(
+                                    samples_seen, utterance_samples
+                                )
+                            else:
+                                started_at = datetime.now() - timedelta(
+                                    seconds=stream.seed_skew_sec
+                                )
                             if last_final_ts is not None:
                                 started_at = max(started_at, last_final_ts)
                         last_partial = text
                         self.on_partial(self.label, text, started_at, speaker)
             if samples is SENTINEL:
                 break
+        if self.on_done is not None:
+            self.on_done(self.label, samples_seen)

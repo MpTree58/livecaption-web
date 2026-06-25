@@ -45,6 +45,10 @@ SAMPLE_RATE = 16000  # ASR / VAD / audiotee all use 16k mono
 # while the tap stays on the old one, whose IO stops). The source then kills and
 # respawns audiotee, which re-taps the current default device, so captions resume.
 SYSTEM_AUDIO_STALL_SEC = 5.0
+# File/podcast transcription sanity check: warn when the last finalized utterance is this far
+# before the end of the audio. A small gap can be outro music or silence; a large one usually
+# means the run was interrupted or the recognizer stopped emitting useful speech.
+FILE_TRAILING_GAP_WARN_SEC = 300.0
 
 # ---- ASR (mlx-audio nemotron-3.5) ----
 # English by default; CLI --asr-lang overrides it. The CLI accepts lowercase tags such as

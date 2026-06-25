@@ -45,6 +45,10 @@ uv run livecaption --source both --out meeting.md
 # 转录音频文件（会议录音复盘 / 端到端测试；wav/mp3/m4a，自动重采样，跑完即退出）
 uv run livecaption --source file --file recording.m4a --out recording.md
 
+# 播客音频成稿：使用音频进度时间戳，并避免 qwen 词级说话人切分把句子切碎
+uv run --extra qwen livecaption --source file --file podcast.mp3 --out podcast.md \
+  --asr-model qwen3-1.7b-8bit --asr-lang Chinese --podcast --no-translate
+
 # 翻译默认带前 3 句上下文（提升代词指代/术语连贯）；如需关闭或调整：
 uv run livecaption --source system --context 0
 

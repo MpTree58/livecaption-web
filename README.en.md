@@ -45,6 +45,11 @@ uv run livecaption --source both --out meeting.md
 # Transcribe an audio file (meeting recording review / end-to-end test; wav/mp3/m4a, auto-resampled, exits when done)
 uv run livecaption --source file --file recording.m4a --out recording.md
 
+# Podcast transcripts: use audio-position timestamps and avoid qwen word-level diarization
+# fragmenting readable sentences
+uv run --extra qwen livecaption --source file --file podcast.mp3 --out podcast.md \
+  --asr-model qwen3-1.7b-8bit --asr-lang Chinese --podcast --no-translate
+
 # Translation includes the previous 3 sentences of context by default (improves pronoun reference / terminology consistency); to disable or adjust:
 uv run livecaption --source system --context 0
 

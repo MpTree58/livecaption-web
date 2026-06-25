@@ -253,9 +253,11 @@ class QwenOnlineStream:
     finish_streaming over the buffered tail.
 
     accept_waveform / flush return events in the OnlineStream shapes AsrWorker expects:
-      ("partial", text, None)               text = the whole in-progress utterance (no live
+      ("partial", text, None, utterance_samples)
+                                             text = the whole in-progress utterance (no live
                                              speaker label on partials)
-      ("final", [(speaker, text, diff), ...])  one segment per speaker. speaker = Sortformer
+      ("final", [(speaker, text, diff), ...], utterance_samples)
+                                             one segment per speaker. speaker = Sortformer
                                              number (None if --no-diarize); text is the two-pass
                                              offline re-decode, diff is its CJK-aware inline-diff
                                              spans vs the streaming text (None if unchanged).
@@ -390,7 +392,7 @@ class QwenOnlineStream:
             self._state = self._feed_audio(audio, self._state, model=self._rec.model_obj)
         self._text = (self._state.text or "").strip()
         if self._text and self._text != prev:
-            return [("partial", self._text, None)]
+            return [("partial", self._text, None, self._n_samples)]
         return []
 
     def _finalize(self) -> list[tuple]:
@@ -401,6 +403,7 @@ class QwenOnlineStream:
             self._state = self._finish_streaming(self._state, model=self._rec.model_obj)
         stream_text = (self._state.text or "").strip()
         audio = np.concatenate(self._utt_audio) if self._utt_audio else None
+        utterance_samples = self._n_samples
         have_audio = audio is not None and len(audio) > 0
         # Word-level diarization needs the offline re-decode's word timestamps; running it with
         # return_timestamps=True also gives the corrected text, so it subsumes the two-pass.
@@ -431,7 +434,7 @@ class QwenOnlineStream:
         ]
         if not segments:
             return []
-        return [("final", segments)]
+        return [("final", segments, utterance_samples)]
 
     def _dominant_speaker(self, audio: np.ndarray) -> int | None:
         """Utterance-level speaker label: feed the whole sentence to Sortformer (native working

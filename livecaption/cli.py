@@ -91,6 +91,11 @@ def main(
     list_devices: bool = typer.Option(
         False, rich_help_panel="Audio & input", help="List audio input devices and exit",
     ),
+    podcast: bool = typer.Option(
+        False, "--podcast", rich_help_panel="Audio & input",
+        help="Podcast-file preset: keep audio timestamps, use less intrusive qwen speaker "
+        "labels, and warn if the transcript appears incomplete",
+    ),
     # --- ASR ---
     asr_model: AsrModel = typer.Option(
         _DEFAULT_ASR_MODEL, "--asr-model", metavar="MODEL", show_choices=False,
@@ -174,6 +179,10 @@ def main(
     backend_name, asr_model_id = config.ASR_MODELS[asr_model.value]
     mt_model_id = config.MT_MODELS[mt_model.value]
 
+    if podcast and source is not SourceKind.file:
+        console.print("[red]--podcast only applies to --source file[/red]")
+        raise typer.Exit(1)
+
     # --qwen-word-diarize is qwen3-only (it drives the Qwen3-ForcedAligner); reject it for the
     # nemotron engine rather than silently ignoring it. None = not passed.
     if backend_name != "qwen3" and qwen_word_diarize is not None:
@@ -213,8 +222,13 @@ def main(
             word_diarize = (
                 qwen_word_diarize
                 if qwen_word_diarize is not None
-                else config.QWEN_WORD_DIARIZE
+                else (False if podcast else config.QWEN_WORD_DIARIZE)
             )
+            if podcast and diarize and qwen_word_diarize is None:
+                console.print(
+                    "[dim]Podcast mode: qwen word-level diarization is disabled for cleaner "
+                    "speaker labels. Pass --qwen-word-diarize to force it.[/dim]"
+                )
             if diarize and not word_diarize:
                 console.print(
                     "[dim]Note: qwen3 diarization is utterance-level (one speaker per "
@@ -298,6 +312,8 @@ def main(
 
         # words already covered by the last live-preview translation, per source (debounce state)
         preview_words: dict[str, int] = {}
+        last_final_at: dict[str, datetime] = {}
+        source_samples_seen: dict[str, int] = {}
 
         def handle_partial(
             label: str, text: str, started_at: datetime, speaker: int | None = None
@@ -314,6 +330,7 @@ def main(
                     translator.submit_preview(label, [(speaker, text, None)], started_at)
 
         def handle_final(label: str, segments: list, started_at: datetime) -> None:
+            last_final_at[label] = started_at
             preview_words.pop(label, None)  # reset debounce for the next utterance
             # segments = [(speaker, text, diff), ...]; --no-diff drops the two-pass inline
             # correction spans so the terminal shows plain corrected text
@@ -329,6 +346,37 @@ def main(
             if translator:
                 translator.submit(label, segments, started_at)
 
+        def handle_source_done(label: str, samples_seen: int) -> None:
+            source_samples_seen[label] = samples_seen
+
+        def warn_if_file_transcript_looks_incomplete() -> None:
+            """File/podcast guardrail: the run consumed all audio, but the last emitted final is
+            far from the media end. That can be a long outro/music bed, but for podcast text
+            workflows it often means the run was interrupted or useful speech was missed."""
+            if source is not SourceKind.file:
+                return
+            for label, samples_seen in source_samples_seen.items():
+                last = last_final_at.get(label)
+                if last is None:
+                    console.print(
+                        f"[yellow]Warning: '{label}' consumed "
+                        f"{samples_seen / config.SAMPLE_RATE:.1f}s of audio but emitted no "
+                        "final transcript.[/yellow]"
+                    )
+                    continue
+                media_sec = samples_seen / config.SAMPLE_RATE
+                # File-mode timestamps are anchored at 2000-01-01 00:00:00.
+                last_sec = (
+                    last - datetime(last.year, last.month, last.day)
+                ).total_seconds()
+                gap = media_sec - last_sec
+                if gap >= config.FILE_TRAILING_GAP_WARN_SEC:
+                    console.print(
+                        f"[yellow]Warning: last transcript for '{label}' is "
+                        f"{gap / 60:.1f} min before the end of the audio. This may be outro "
+                        "music/silence, or the transcript may be incomplete.[/yellow]"
+                    )
+
         workers: list[AsrWorker] = []
         for src in sources:
             # the weights carry no decode state and can be shared; each worker create_stream's
@@ -338,6 +386,8 @@ def main(
             worker = AsrWorker(
                 recognizer, src.queue, src.label, handle_partial, handle_final,
                 on_error=stop_event.set,
+                on_done=handle_source_done,
+                use_audio_timestamps=source is SourceKind.file,
             )
             workers.append(worker)
             worker.start()
@@ -361,6 +411,7 @@ def main(
                 for w in workers:
                     while w.is_alive() and not stop_event.is_set():
                         w.join(timeout=0.2)
+                warn_if_file_transcript_looks_incomplete()
                 if translator is not None and not stop_event.is_set():
                     # None goes at the tail, so the backlog of translations gets done first
                     translator.stop()
