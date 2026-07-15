@@ -119,6 +119,14 @@ class Translator(threading.Thread):
             self._preview_seq[label] = seq
         self._queue.put(("preview", label, segments, started_at, seq))
 
+    def reset_context(self) -> None:
+        """Clear the rolling translation context and echo-detection state. Used between web
+        sessions so a new meeting doesn't inherit the previous one's background sentences
+        (the translator thread is kept warm and reused across start/stop)."""
+        if self._history is not None:
+            self._history.clear()
+        self._last_zh = ""
+
     def stop(self) -> None:
         self._queue.put(None)
 

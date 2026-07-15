@@ -1,0 +1,505 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>livecaption</title>
+<style>
+  :root {
+    --bg: #0f1115; --panel: #171a21; --panel2: #12151b; --border: #2a2f3a;
+    --fg: #e6e8ec; --muted: #8b93a1; --ts: #6b7480;
+    --partial: #9aa3b0; --del: #7a828f; --add: #46c25e;
+    --zh: #7fd4e6; --accent: #4c8dff; --warn: #ffcf6b; --warnbg: #3a2f14;
+    --sel: #223052;
+    --m1: #e05fd0; --m2: #ffa23a; --m3: #ff5a5a; --m4: #ff8db0;
+    --t1: #5b9dff; --t2: #b98cff; --t3: #7d8cff; --t4: #98a6c8;
+    --badge-me-bg: #3a2a12; --badge-me-fg: #ffbf6b;
+    --badge-them-bg: #16294a; --badge-them-fg: #7fb0ff;
+  }
+  @media (prefers-color-scheme: light) {
+    :root {
+      --bg: #f7f8fa; --panel: #ffffff; --panel2: #f0f2f5; --border: #e2e5ea;
+      --fg: #1c2129; --muted: #5b636f; --ts: #8b93a1;
+      --partial: #6b7480; --del: #98a0ac; --add: #1f9d3d;
+      --zh: #0f6f88; --accent: #2f6fe0; --warn: #7a5b00; --warnbg: #fff4d6;
+      --sel: #e4ecfb;
+      --m1: #b5199e; --m2: #b8620a; --m3: #d12b2b; --m4: #c23a75;
+      --t1: #2f6fe0; --t2: #7a3fd0; --t3: #4351c8; --t4: #56627a;
+      --badge-me-bg: #fdeccf; --badge-me-fg: #8a5a00;
+      --badge-them-bg: #dfe9ff; --badge-them-fg: #2551a0;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--bg); color: var(--fg);
+    font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    display: flex; flex-direction: column; height: 100vh;
+  }
+  header {
+    display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+    padding: 10px 16px; background: var(--panel); border-bottom: 1px solid var(--border);
+  }
+  h1 { font-size: 15px; font-weight: 700; margin: 0; letter-spacing: .3px; }
+  h1 .dot { color: var(--muted); font-weight: 400; }
+  .seg { display: inline-flex; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+  .seg button { background: transparent; color: var(--fg); border: 0; padding: 6px 12px; font: inherit; cursor: pointer; }
+  .seg button.active { background: var(--accent); color: #fff; }
+  .seg button:disabled { opacity: .5; cursor: not-allowed; }
+  #lang { padding: 6px 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); color: var(--fg); font: inherit; font-size: 13px; cursor: pointer; }
+  #lang:disabled { opacity: .5; cursor: not-allowed; }
+  #toggle { padding: 7px 18px; border: 0; border-radius: 8px; font: inherit; font-weight: 600; cursor: pointer; background: var(--add); color: #05230e; }
+  #toggle.running { background: var(--m3); color: #fff; }
+  #status { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: 13px; }
+  #status .led { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); }
+  #status.listening .led { background: var(--add); box-shadow: 0 0 6px var(--add); }
+  #status.starting .led, #status.stopping .led { background: var(--warn); }
+  .spacer { flex: 1; }
+  label.chk { color: var(--muted); font-size: 13px; display: inline-flex; align-items: center; gap: 5px; cursor: pointer; }
+  #banner { display: none; padding: 8px 16px; background: var(--warnbg); color: var(--warn); border-bottom: 1px solid var(--border); font-size: 13px; }
+
+  #body { flex: 1; display: flex; min-height: 0; }
+  /* --- sidebar --- */
+  #sidebar { width: 264px; background: var(--panel2); border-right: 1px solid var(--border); display: flex; flex-direction: column; min-height: 0; }
+  #search { margin: 10px; padding: 7px 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); color: var(--fg); font: inherit; font-size: 13px; }
+  #meetinglist { overflow-y: auto; flex: 1; padding: 0 6px 10px; }
+  .mi { padding: 8px 10px; border-radius: 8px; cursor: pointer; margin-bottom: 2px; }
+  .mi:hover { background: var(--border); }
+  .mi.sel { background: var(--sel); }
+  .mi .t { font-size: 13.5px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .mi .m { font-size: 11.5px; color: var(--muted); display: flex; align-items: center; gap: 6px; margin-top: 1px; }
+  .mi .rec { color: var(--m3); font-weight: 700; }
+  .mi .snip { font-size: 11.5px; color: var(--muted); margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-style: italic; }
+  .listempty { color: var(--muted); font-size: 13px; padding: 12px; text-align: center; }
+
+  /* --- main pane --- */
+  #pane { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+  #viewhead { padding: 12px 16px 10px; border-bottom: 1px solid var(--border); }
+  #title { font-size: 18px; font-weight: 700; border: 1px solid transparent; border-radius: 6px; background: transparent; color: var(--fg); font-family: inherit; padding: 3px 6px; width: 100%; }
+  #title:hover { border-color: var(--border); }
+  #title:focus { border-color: var(--accent); outline: none; background: var(--bg); }
+  #viewmeta { display: flex; align-items: center; gap: 12px; margin-top: 6px; font-size: 12.5px; color: var(--muted); padding-left: 6px; }
+  #viewmeta a, #viewmeta button { color: var(--accent); font-size: 12.5px; text-decoration: none; background: none; border: 0; cursor: pointer; font-family: inherit; padding: 0; }
+  #viewmeta button.danger { color: var(--m3); }
+  #viewmeta a:hover, #viewmeta button:hover { text-decoration: underline; }
+
+  #content { flex: 1; display: flex; min-height: 0; }
+  #scroll { flex: 1; overflow-y: auto; padding: 16px; min-width: 0; }
+  #notespanel { width: 300px; border-left: 1px solid var(--border); display: flex; flex-direction: column; background: var(--panel2); }
+  .nhead { padding: 10px 14px; font-size: 12px; font-weight: 700; color: var(--muted); letter-spacing: .5px; text-transform: uppercase; border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; }
+  .nhead .saved { font-weight: 400; text-transform: none; letter-spacing: 0; }
+  #notes { flex: 1; border: 0; resize: none; background: transparent; color: var(--fg); font: inherit; padding: 12px 14px; outline: none; }
+
+  .u { margin: 0 0 14px; }
+  .ts { color: var(--ts); font-variant-numeric: tabular-nums; margin-right: 8px; font-size: 13px; }
+  .badge { display: none; font-size: 11px; font-weight: 700; padding: 1px 7px; border-radius: 5px; margin-right: 8px; vertical-align: 1px; }
+  .doc.multi .badge { display: inline-block; }
+  .badge.me { background: var(--badge-me-bg); color: var(--badge-me-fg); }
+  .badge.them { background: var(--badge-them-bg); color: var(--badge-them-fg); }
+  .zh { color: var(--zh); font-weight: 600; margin-top: 2px; }
+  .zh.pending { color: var(--muted); font-weight: 400; font-style: italic; }
+  .sp { font-weight: 700; margin-right: 4px; }
+  .sp.me.s0 { color: var(--m1); } .sp.me.s1 { color: var(--m2); } .sp.me.s2 { color: var(--m3); } .sp.me.s3 { color: var(--m4); }
+  .sp.them.s0 { color: var(--t1); } .sp.them.s1 { color: var(--t2); } .sp.them.s2 { color: var(--t3); } .sp.them.s3 { color: var(--t4); }
+  .del { color: var(--del); text-decoration: line-through; }
+  .add { color: var(--add); font-weight: 600; }
+  #livepartials .en { color: var(--partial); }
+  .empty { color: var(--muted); text-align: center; margin-top: 16vh; font-size: 14px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>livecaption <span class="dot">· web</span></h1>
+  <div class="seg" id="source">
+    <button data-src="mic">Mic</button>
+    <button data-src="system">System</button>
+    <button data-src="both" class="active">Both</button>
+  </div>
+  <select id="lang" title="Spoken language → translation"></select>
+  <button id="toggle">Start</button>
+  <div id="status"><span class="led"></span><span id="statustext">idle</span></div>
+  <div class="spacer"></div>
+  <label class="chk"><input type="checkbox" id="diffchk" checked> diff</label>
+  <label class="chk"><input type="checkbox" id="autochk" checked> auto-scroll</label>
+</header>
+<div id="banner"></div>
+
+<div id="body">
+  <aside id="sidebar">
+    <input id="search" type="search" placeholder="Search meetings…">
+    <div id="meetinglist"></div>
+  </aside>
+  <section id="pane">
+    <div id="viewhead">
+      <input id="title" placeholder="Untitled meeting">
+      <div id="viewmeta">
+        <span id="metatext"></span>
+        <span class="spacer"></span>
+        <a id="export" href="#">Export ↓</a>
+        <button id="delete" class="danger">Delete</button>
+      </div>
+    </div>
+    <div id="content">
+      <div id="scroll">
+        <div id="livedoc" class="doc"></div>
+        <div id="livepartials"></div>
+        <div id="pastdoc" class="doc" style="display:none"></div>
+        <div class="empty" id="empty">Pick a source and click Start — or select a past meeting.</div>
+      </div>
+      <div id="notespanel">
+        <div class="nhead"><span>Notes</span><span class="saved" id="notesaved"></span></div>
+        <textarea id="notes" placeholder="Type meeting notes…"></textarea>
+      </div>
+    </div>
+  </section>
+</div>
+
+<script>
+(function () {
+  "use strict";
+  const $ = (s) => document.querySelector(s);
+  const scroll = $("#scroll"), livedoc = $("#livedoc"), livepartials = $("#livepartials");
+  const pastdoc = $("#pastdoc"), empty = $("#empty"), banner = $("#banner");
+  const toggle = $("#toggle"), statusEl = $("#status"), statusText = $("#statustext");
+  const sourceBtns = Array.from(document.querySelectorAll("#source button"));
+  const diffChk = $("#diffchk"), autoChk = $("#autochk");
+  const listEl = $("#meetinglist"), searchEl = $("#search"), langEl = $("#lang");
+  const titleEl = $("#title"), metaText = $("#metatext"), exportA = $("#export"),
+        deleteBtn = $("#delete"), notesEl = $("#notes"), notesaved = $("#notesaved");
+
+  const st = { running: false, liveId: null, selected: null, source: "both", lang: "en",
+               meetings: [], liveSeen: new Set() };
+  let bannerTimer = null, notesTimer = null;
+
+  // --- api ---
+  const api = {
+    get: (p) => fetch(p).then((r) => r.json()),
+    post: (p, b) => fetch(p, { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(b || {}) }).then((r) => r.json()),
+    del: (p) => fetch(p, { method: "DELETE" }).then((r) => r.json()),
+  };
+
+  // --- shared render helpers (used for both live stream and saved meetings) ---
+  const sideOf = (label) => (label === "them" ? "them" : "me");
+  const cssId = (key) => key.replace(/[^a-zA-Z0-9_-]/g, "_");
+  function badgeFor(side) {
+    const b = document.createElement("span");
+    b.className = "badge " + side;
+    b.textContent = side === "them" ? "线上" : "现场";
+    return b;
+  }
+  function speakerSpan(spk, side) {
+    if (spk === null || spk === undefined) return null;
+    const el = document.createElement("span");
+    el.className = "sp " + side + " s" + (spk % 4);
+    el.textContent = "S" + (spk + 1) + " ";
+    return el;
+  }
+  function renderEn(container, segments, side) {
+    container.textContent = "";
+    segments.forEach((seg, i) => {
+      if (i) container.appendChild(document.createTextNode("  "));
+      const sp = speakerSpan(seg.speaker, side);
+      if (sp) container.appendChild(sp);
+      if (seg.diff && diffChk.checked) {
+        seg.diff.forEach(([kind, words]) => {
+          if (kind === "same") { container.appendChild(document.createTextNode(words)); }
+          else {
+            const s = document.createElement("span");
+            s.className = kind === "del" ? "del" : "add";
+            s.textContent = words;
+            container.appendChild(s);
+          }
+        });
+      } else {
+        container.appendChild(document.createTextNode(seg.text));
+      }
+    });
+  }
+  function renderZh(container, segments, side) {
+    container.textContent = "";
+    segments.forEach((seg, i) => {
+      if (i) container.appendChild(document.createTextNode("  "));
+      const sp = speakerSpan(seg.speaker, side);
+      if (sp) container.appendChild(sp);
+      container.appendChild(document.createTextNode(seg.zh));
+    });
+  }
+  // build one finalized utterance block (used by live finals and saved meetings)
+  function makeUtterance(u) {
+    const side = sideOf(u.label);
+    const el = document.createElement("div");
+    el.className = "u"; el.id = "u-" + cssId(u.key);
+    const en = document.createElement("div"); en.className = "en";
+    const ts = document.createElement("span"); ts.className = "ts"; ts.textContent = u.at;
+    en.appendChild(ts); en.appendChild(badgeFor(side));
+    const body = document.createElement("span"); body.className = "enbody";
+    en.appendChild(body);
+    renderEn(body, u.en, side);
+    const zh = document.createElement("div"); zh.className = "zh";
+    if (u.zh) { renderZh(zh, u.zh, side); } else { zh.classList.add("pending"); }
+    el.appendChild(en); el.appendChild(zh);
+    return el;
+  }
+  const nearBottom = () => scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 60;
+  function maybeScroll(was) { if (autoChk.checked && was) scroll.scrollTop = scroll.scrollHeight; }
+  const viewingLive = () => st.selected && st.selected === st.liveId;
+
+  // --- live SSE rendering (targets livedoc/livepartials) ---
+  function upsertFinal(ev) {
+    if (!st.liveSeen.has(ev.label)) { st.liveSeen.add(ev.label); if (st.liveSeen.size > 1) livedoc.classList.add("multi"); }
+    const p = document.getElementById("p-" + ev.label); if (p) p.remove();
+    const was = nearBottom();
+    let u = document.getElementById("u-" + cssId(ev.key));
+    const rec = { key: ev.key, label: ev.label, at: ev.at, en: ev.segments, zh: null };
+    if (!u) { livedoc.appendChild(makeUtterance(rec)); }
+    else { renderEn(u.querySelector(".enbody"), ev.segments, sideOf(ev.label)); }
+    if (viewingLive()) { empty.style.display = "none"; maybeScroll(was); }
+  }
+  function applyTranslation(ev) {
+    const u = document.getElementById("u-" + cssId(ev.key)); if (!u) return;
+    const was = nearBottom();
+    const zh = u.querySelector(".zh"); zh.classList.remove("pending");
+    renderZh(zh, ev.segments, sideOf(ev.label));
+    if (viewingLive()) maybeScroll(was);
+  }
+  function upsertPartial(ev) {
+    if (!st.liveSeen.has(ev.label)) { st.liveSeen.add(ev.label); if (st.liveSeen.size > 1) livedoc.classList.add("multi"); }
+    const side = sideOf(ev.label), was = nearBottom();
+    let p = document.getElementById("p-" + ev.label);
+    if (!p) {
+      p = document.createElement("div"); p.className = "u"; p.id = "p-" + ev.label;
+      const en = document.createElement("div"); en.className = "en";
+      const ts = document.createElement("span"); ts.className = "ts";
+      const body = document.createElement("span"); body.className = "pbody";
+      en.appendChild(ts); en.appendChild(badgeFor(side)); en.appendChild(body);
+      // partials share the multi state of livedoc for badge visibility
+      if (livedoc.classList.contains("multi")) p.classList.add("multi");
+      p.classList.add("doc");
+      livepartials.appendChild(p);
+    }
+    p.dataset.key = ev.key;
+    p.querySelector(".ts").textContent = ev.at;
+    const body = p.querySelector(".pbody"); body.textContent = "";
+    const sp = speakerSpan(ev.speaker, side); if (sp) body.appendChild(sp);
+    body.appendChild(document.createTextNode(ev.text));
+    if (viewingLive()) { empty.style.display = "none"; maybeScroll(was); }
+  }
+  function flushPending() {
+    livedoc.querySelectorAll(".zh.pending").forEach((z) => { z.classList.remove("pending"); z.textContent = ""; });
+  }
+  function clearLive() {
+    livedoc.textContent = ""; livepartials.textContent = "";
+    livedoc.classList.remove("multi"); st.liveSeen = new Set();
+  }
+
+  // --- meeting list / selection ---
+  function fmtDate(iso) {
+    if (!iso) return "";
+    return iso.replace("T", " ").slice(5, 16); // MM-DD HH:MM
+  }
+  function renderList(items, isSearch) {
+    listEl.textContent = "";
+    if (!items.length) {
+      const e = document.createElement("div"); e.className = "listempty";
+      e.textContent = isSearch ? "No matches." : "No meetings yet.";
+      listEl.appendChild(e); return;
+    }
+    items.forEach((m) => {
+      const el = document.createElement("div");
+      el.className = "mi" + (m.id === st.selected ? " sel" : "");
+      const t = document.createElement("div"); t.className = "t"; t.textContent = m.title || m.id;
+      const meta = document.createElement("div"); meta.className = "m";
+      if (m.id === st.liveId) {
+        const r = document.createElement("span"); r.className = "rec"; r.textContent = "● REC"; meta.appendChild(r);
+      }
+      const d = document.createElement("span"); d.textContent = fmtDate(m.created_at); meta.appendChild(d);
+      const c = document.createElement("span"); c.textContent = "· " + (m.utterances || 0); meta.appendChild(c);
+      if (m.source) { const s = document.createElement("span"); s.textContent = "· " + m.source; meta.appendChild(s); }
+      if (m.lang_label) { const l = document.createElement("span"); l.textContent = "· " + m.lang_label; meta.appendChild(l); }
+      el.appendChild(t); el.appendChild(meta);
+      if (m.snippet) { const sn = document.createElement("div"); sn.className = "snip"; sn.textContent = m.snippet; el.appendChild(sn); }
+      el.addEventListener("click", () => selectMeeting(m.id));
+      listEl.appendChild(el);
+    });
+  }
+  async function refreshList() {
+    const r = await api.get("/meetings");
+    st.meetings = r.meetings || [];
+    if (!searchEl.value.trim()) renderList(st.meetings, false);
+  }
+  function metaSummary(m) {
+    const parts = [];
+    if (m.created_at) parts.push(fmtDate(m.created_at));
+    if (m.source) parts.push(m.source);
+    if (m.lang_label) parts.push(m.lang_label);
+    parts.push((m.utterances || 0) + " lines");
+    return parts.join(" · ");
+  }
+
+  async function selectMeeting(id) {
+    st.selected = id;
+    Array.from(listEl.children).forEach((c) => c.classList.remove("sel"));
+    // load meeting record (for title, notes, meta, and — for past — utterances)
+    const data = await api.get("/meetings/" + id).catch(() => null);
+    if (!data || data.error) return;
+    titleEl.value = data.title || "";
+    notesEl.value = data.notes || ""; notesaved.textContent = "";
+    metaText.textContent = metaSummary({ created_at: data.created_at, source: data.source,
+      lang_label: data.lang_label, utterances: (data.utterances || []).length });
+    exportA.href = "/meetings/" + id + "/export.md";
+    const isLive = (id === st.liveId);
+    deleteBtn.style.display = isLive ? "none" : "";
+    // render body: live shows the streaming DOM, past renders from saved utterances
+    if (isLive) {
+      livedoc.style.display = ""; livepartials.style.display = ""; pastdoc.style.display = "none";
+      empty.style.display = (livedoc.children.length || livepartials.children.length) ? "none" : "";
+    } else {
+      livedoc.style.display = "none"; livepartials.style.display = "none"; pastdoc.style.display = "";
+      empty.style.display = "none";
+      pastdoc.textContent = "";
+      pastdoc.classList.toggle("multi", data.source === "both");
+      (data.utterances || []).forEach((u) => pastdoc.appendChild(makeUtterance(u)));
+      if (!(data.utterances || []).length) {
+        const e = document.createElement("div"); e.className = "empty";
+        e.textContent = "No transcript in this meeting."; pastdoc.appendChild(e);
+      }
+    }
+    // reflect selection highlight in the list
+    Array.from(listEl.children).forEach((c) => {
+      const t = c.querySelector(".t"); c.classList.toggle("sel", t && t.textContent === (data.title || id));
+    });
+    refreshList();
+  }
+
+  // --- notes autosave ---
+  notesEl.addEventListener("input", () => {
+    if (!st.selected) return;
+    notesaved.textContent = "saving…";
+    if (notesTimer) clearTimeout(notesTimer);
+    const id = st.selected, val = notesEl.value;
+    notesTimer = setTimeout(async () => {
+      await api.post("/meetings/" + id + "/notes", { notes: val });
+      if (st.selected === id) notesaved.textContent = "saved";
+    }, 700);
+  });
+
+  // --- title rename ---
+  function saveTitle() {
+    if (!st.selected) return;
+    api.post("/meetings/" + st.selected + "/rename", { title: titleEl.value }).then(refreshList);
+  }
+  titleEl.addEventListener("blur", saveTitle);
+  titleEl.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); titleEl.blur(); } });
+
+  // --- delete ---
+  deleteBtn.addEventListener("click", async () => {
+    if (!st.selected || st.selected === st.liveId) return;
+    if (!confirm("Delete this meeting?")) return;
+    const r = await api.del("/meetings/" + st.selected);
+    if (r.ok) {
+      st.selected = null; pastdoc.textContent = ""; titleEl.value = ""; notesEl.value = "";
+      metaText.textContent = ""; empty.style.display = "";
+      await refreshList();
+      if (st.meetings.length) selectMeeting(st.meetings[0].id);
+    }
+  });
+
+  // --- search ---
+  let searchTimer = null;
+  searchEl.addEventListener("input", () => {
+    if (searchTimer) clearTimeout(searchTimer);
+    const q = searchEl.value.trim();
+    searchTimer = setTimeout(async () => {
+      if (!q) { renderList(st.meetings, false); return; }
+      const r = await api.get("/search?q=" + encodeURIComponent(q));
+      renderList(r.results || [], true);
+    }, 250);
+  });
+
+  // --- SSE ---
+  function connect() {
+    const es = new EventSource("/events");
+    es.onmessage = (e) => {
+      let ev; try { ev = JSON.parse(e.data); } catch (_) { return; }
+      switch (ev.type) {
+        case "partial": upsertPartial(ev); break;
+        case "final": upsertFinal(ev); break;
+        case "translation": applyTranslation(ev); break;
+        case "flush": flushPending(); break;
+        case "status": onStatus(ev); break;
+        case "log": showBanner(ev.level, ev.message); break;
+      }
+    };
+    es.onerror = () => {};
+  }
+
+  function setStatusPill(state) {
+    st.running = (state === "listening" || state === "starting" || state === "stopping");
+    statusEl.className = state; statusText.textContent = state;
+    toggle.textContent = (state === "idle") ? "Start"
+      : (state === "starting" ? "Starting…" : (state === "stopping" ? "Stopping…" : "Stop"));
+    toggle.classList.toggle("running", state === "listening" || state === "stopping");
+    toggle.disabled = (state === "starting" || state === "stopping");
+    sourceBtns.forEach((b) => (b.disabled = st.running));
+    langEl.disabled = st.running;
+  }
+
+  async function onStatus(ev) {
+    setStatusPill(ev.state);
+    if (ev.source) {
+      st.source = ev.source;
+      sourceBtns.forEach((b) => b.classList.toggle("active", b.dataset.src === ev.source));
+    }
+    if (ev.lang) { st.lang = ev.lang; langEl.value = ev.lang; }
+    if (ev.state === "listening" && ev.meeting) {
+      if (ev.meeting !== st.liveId) clearLive();       // new recording started
+      st.liveId = ev.meeting;
+      await refreshList();
+      selectMeeting(ev.meeting);                        // jump to the live meeting
+    } else if (ev.state === "idle") {
+      const ended = st.liveId; st.liveId = null;
+      await refreshList();
+      // if we were watching the just-ended meeting, re-render it as a saved (past) one
+      if (ended && st.selected === ended) selectMeeting(ended);
+    }
+  }
+
+  function showBanner(level, msg) {
+    banner.textContent = msg; banner.style.display = "block";
+    banner.style.color = level === "warn" ? "var(--warn)" : "var(--muted)";
+    banner.style.background = level === "warn" ? "var(--warnbg)" : "var(--panel)";
+    if (bannerTimer) clearTimeout(bannerTimer);
+    if (level !== "warn") bannerTimer = setTimeout(() => { banner.style.display = "none"; }, 6000);
+  }
+
+  // --- controls ---
+  sourceBtns.forEach((b) => b.addEventListener("click", () => {
+    if (st.running) return;
+    st.source = b.dataset.src;
+    sourceBtns.forEach((x) => x.classList.toggle("active", x === b));
+  }));
+  langEl.addEventListener("change", () => { if (!st.running) st.lang = langEl.value; });
+  toggle.addEventListener("click", () => {
+    if (!st.running) api.post("/start", { source: st.source, lang: st.lang });
+    else api.post("/stop", {});
+  });
+
+  // --- init ---
+  (async function init() {
+    await refreshList();
+    const state = await api.get("/state").catch(() => ({}));
+    // populate the language picker from the server's presets
+    (state.langs || []).forEach((l) => {
+      const o = document.createElement("option");
+      o.value = l.key; o.textContent = l.label; langEl.appendChild(o);
+    });
+    if (state.lang) { st.lang = state.lang; langEl.value = state.lang; }
+    if (state.running && state.meeting) { st.liveId = state.meeting; }
+    if (st.meetings.length) selectMeeting((st.liveId || st.meetings[0].id));
+    connect();
+  })();
+})();
+</script>
+</body>
+</html>
