@@ -24,10 +24,14 @@ dependencies = [
 # Pin <0.4: asr_qwen.py imports the package internals (`mlx_qwen3_asr.streaming` +
 # undocumented state/result fields), so a minor bump may break it -- mirror the mlx-audio cap.
 qwen = ["mlx-qwen3-asr>=0.3.5,<0.4"]
+# Menu-bar app wrapper (a no-terminal client for non-technical users). rumps = a tiny
+# PyObjC-based macOS status-bar app framework. Install with `uv sync --extra app`.
+app = ["rumps>=0.4"]
 
 [project.scripts]
 livecaption = "livecaption.cli:run"
 livecaption-web = "livecaption.webapp:run"
+livecaption-app = "livecaption.menubar:run"
 
 [build-system]
 requires = ["hatchling"]
