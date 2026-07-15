@@ -152,6 +152,48 @@ def regen_token(user_id: int) -> str:
     return token
 
 
+def change_password(user_id: int, old: str, new: str) -> bool:
+    """Self-service password change: only succeeds if the current password checks out."""
+    u = get_user_by_id(user_id)
+    if not u or not verify_password(old, u["password_hash"]) or not new:
+        return False
+    set_password(user_id, new)
+    return True
+
+
+def count_owned_meetings(user_id: int) -> int:
+    with _connect() as conn:
+        return conn.execute(
+            "SELECT COUNT(*) c FROM meetings WHERE owner_id=?", (user_id,)
+        ).fetchone()["c"]
+
+
+def transfer_meetings(from_user_id: int, to_user_id: int) -> int:
+    """Reassign ownership of all of a user's meetings to another user (used before deleting a
+    departing member so their meetings survive). The meeting id stays the same (it is just an
+    opaque unique key); only owner_id changes."""
+    with _LOCK, _connect() as conn:
+        cur = conn.execute("UPDATE meetings SET owner_id=? WHERE owner_id=?",
+                           (to_user_id, from_user_id))
+        return cur.rowcount
+
+
+def delete_user(user_id: int) -> bool:
+    """Remove a user and everything tied to them: their meetings (and those meetings' shares)
+    and any meetings shared TO them. Reassign first with transfer_meetings() to keep the
+    meetings."""
+    with _LOCK, _connect() as conn:
+        if not conn.execute("SELECT 1 FROM users WHERE id=?", (user_id,)).fetchone():
+            return False
+        conn.execute(
+            "DELETE FROM shares WHERE meeting_id IN (SELECT id FROM meetings WHERE owner_id=?)",
+            (user_id,))
+        conn.execute("DELETE FROM meetings WHERE owner_id=?", (user_id,))
+        conn.execute("DELETE FROM shares WHERE user_id=?", (user_id,))
+        conn.execute("DELETE FROM users WHERE id=?", (user_id,))
+        return True
+
+
 # ---- meetings ----
 def upsert_meeting(owner_id: int, m: dict) -> str:
     """Insert or update a meeting pushed by an agent. Idempotent per (owner, client id), so a

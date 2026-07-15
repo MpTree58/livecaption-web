@@ -76,6 +76,15 @@ def me(user: dict = Depends(current_user)) -> dict:
     return {"username": user["username"], "is_admin": bool(user["is_admin"])}
 
 
+@app.post("/api/change-password")
+def change_password(body: dict = Body(...), user: dict = Depends(current_user)) -> JSONResponse:
+    if len(body.get("new_password", "")) < 4:
+        raise HTTPException(status_code=400, detail="new password too short (min 4)")
+    if not db.change_password(user["id"], body.get("old_password", ""), body["new_password"]):
+        raise HTTPException(status_code=400, detail="current password is wrong")
+    return JSONResponse({"ok": True})
+
+
 # ---- agent ingest ----
 @app.post("/api/ingest")
 def ingest(meeting: dict = Body(...), user: dict = Depends(agent_user)) -> dict:

@@ -74,6 +74,36 @@ def cmd_passwd(args: argparse.Namespace) -> None:
     print(f"password updated for {args.username}")
 
 
+def cmd_deluser(args: argparse.Namespace) -> None:
+    u = db.get_user_by_username(args.username)
+    if not u:
+        print(f"no such user: {args.username}", file=sys.stderr)
+        raise SystemExit(1)
+    owned = db.count_owned_meetings(u["id"])
+    if owned and not args.purge and not args.transfer:
+        print(
+            f"{args.username} owns {owned} meeting(s). Re-run with one of:\n"
+            f"  --transfer <user>   reassign their meetings to another user, then delete\n"
+            f"  --purge             delete their meetings too",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+    if args.transfer:
+        target = db.get_user_by_username(args.transfer)
+        if not target:
+            print(f"no such transfer target: {args.transfer}", file=sys.stderr)
+            raise SystemExit(1)
+        n = db.transfer_meetings(u["id"], target["id"])
+        print(f"transferred {n} meeting(s) to {args.transfer}")
+    if not args.yes:
+        what = " and their meetings" if args.purge else ""
+        if input(f"Delete user {args.username}{what}? [y/N] ").strip().lower() != "y":
+            print("aborted.")
+            return
+    db.delete_user(u["id"])
+    print(f"deleted user {args.username}")
+
+
 def run() -> None:
     db.init_db()
     p = argparse.ArgumentParser(prog="livecaption-server-admin")
@@ -96,6 +126,13 @@ def run() -> None:
     pw = sub.add_parser("passwd", help="change a user's password")
     pw.add_argument("username")
     pw.set_defaults(func=cmd_passwd)
+
+    du = sub.add_parser("deluser", help="delete a user (whitelist removal, e.g. when they leave)")
+    du.add_argument("username")
+    du.add_argument("--transfer", metavar="USER", help="reassign their meetings to this user first")
+    du.add_argument("--purge", action="store_true", help="delete their meetings too")
+    du.add_argument("--yes", "-y", action="store_true", help="skip the confirmation prompt")
+    du.set_defaults(func=cmd_deluser)
 
     args = p.parse_args()
     args.func(args)

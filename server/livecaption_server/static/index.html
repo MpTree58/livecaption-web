@@ -38,6 +38,8 @@
   /* login */
   #login { position:fixed; inset:0; background:var(--bg); display:none; align-items:center; justify-content:center; z-index:10; }
   #login.show { display:flex; }
+  #pwmodal { position:fixed; inset:0; background:rgba(0,0,0,.55); display:none; align-items:center; justify-content:center; z-index:20; }
+  #pwmodal.show { display:flex; }
   .card { background:var(--panel); border:1px solid var(--border); border-radius:12px; padding:28px; width:320px; }
   .card h2 { margin:0 0 4px; font-size:18px; }
   .card p { margin:0 0 18px; color:var(--muted); font-size:13px; }
@@ -103,8 +105,22 @@
   <h1>livecaption <span class="dot">· meetings</span></h1>
   <div class="spacer"></div>
   <span id="who"></span>
+  <button class="link" id="pwbtn">Password</button>
   <button class="link" id="logout">Log out</button>
 </header>
+
+<div id="pwmodal">
+  <form class="card" id="pwform">
+    <h2>Change password</h2>
+    <p>Update your own password.</p>
+    <input id="oldpw" type="password" placeholder="Current password" autocomplete="current-password">
+    <input id="newpw" type="password" placeholder="New password (min 4)" autocomplete="new-password">
+    <input id="newpw2" type="password" placeholder="Repeat new password" autocomplete="new-password">
+    <button class="primary" type="submit">Update</button>
+    <div class="err" id="pwerr"></div>
+    <button type="button" class="link" id="pwcancel" style="margin-top:10px">Cancel</button>
+  </form>
+</div>
 
 <div id="body">
   <aside id="sidebar">
@@ -168,6 +184,18 @@
     else $("#loginerr").textContent = "Wrong username or password.";
   });
   $("#logout").addEventListener("click", async ()=>{ await api.post("/api/logout",{}); location.reload(); });
+
+  // ---- change password ----
+  const pwmodal=$("#pwmodal");
+  $("#pwbtn").addEventListener("click", ()=>{ $("#oldpw").value=""; $("#newpw").value=""; $("#newpw2").value=""; $("#pwerr").textContent=""; pwmodal.classList.add("show"); $("#oldpw").focus(); });
+  $("#pwcancel").addEventListener("click", ()=> pwmodal.classList.remove("show"));
+  $("#pwform").addEventListener("submit", async (e)=>{
+    e.preventDefault();
+    if($("#newpw").value !== $("#newpw2").value){ $("#pwerr").textContent="New passwords don't match."; return; }
+    const r = await fetch("/api/change-password", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({old_password:$("#oldpw").value, new_password:$("#newpw").value})});
+    if(r.ok){ pwmodal.classList.remove("show"); }
+    else { const d = await r.json().catch(()=>({})); $("#pwerr").textContent = d.detail || "Failed."; }
+  });
 
   // ---- library ----
   function renderList(items, isSearch){
