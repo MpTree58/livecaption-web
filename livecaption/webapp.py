@@ -15,6 +15,7 @@ terminal Renderer (same partial/final/translation/preview/flush_pending contract
 from __future__ import annotations
 
 import json
+import os
 import sys
 import threading
 import webbrowser
@@ -69,6 +70,8 @@ class Session:
         mt_model_id: str,
         context: int,
         audiotee_path: str | None,
+        sync_url: str = "",
+        sync_token: str = "",
     ) -> None:
         self.sink = sink
         self.store = store
@@ -79,6 +82,9 @@ class Session:
         self._mt_model_id = mt_model_id
         self._context = context
         self._audiotee_path = audiotee_path
+        # optional central-server sync: push each finished meeting to a shared library
+        self._sync_url = sync_url.rstrip("/")
+        self._sync_token = sync_token
 
         # warm caches, reused across start/stop and language switches
         self._recognizers: dict[str, object] = {}  # recognizer-config key -> recognizer
@@ -284,11 +290,46 @@ class Session:
                 self.sink.log("warn", f"ASR worker '{worker.label}' did not finish in time.")
         if self._meeting is not None:
             self._meeting.finalize(datetime.now().isoformat())
+            meta = dict(self._meeting.meta)  # snapshot before clearing, for the central sync
             self._meeting = None
+            self._sync_meeting(meta)
         self._sources = []
         self._workers = []
         # idle: the just-ended meeting is now saved; the browser refetches the list
         self.sink.status("idle", None)
+
+    def _sync_meeting(self, meta: dict) -> None:
+        """Push a finished meeting to the central server (best-effort, in the background).
+
+        The local store remains the capture-side source of truth; the server copy is what the
+        team browses. Ingest is idempotent (upsert by owner+id), so a retry never duplicates.
+        Failures only warn -- nothing is lost locally."""
+        if not (self._sync_url and self._sync_token):
+            return
+
+        def _push() -> None:
+            import urllib.error
+            import urllib.request
+
+            body = json.dumps(meta, ensure_ascii=False).encode("utf-8")
+            req = urllib.request.Request(
+                f"{self._sync_url}/api/ingest", data=body, method="POST",
+                headers={"Content-Type": "application/json",
+                         "Authorization": f"Bearer {self._sync_token}"},
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=30) as resp:  # noqa: S310 -- our own URL
+                    if resp.status == 200:
+                        self.sink.log("info", "Synced meeting to the central server.")
+                        return
+                self.sink.log("warn", f"Central sync failed (HTTP {resp.status}).")
+            except urllib.error.HTTPError as e:
+                detail = "bad agent token" if e.code == 401 else f"HTTP {e.code}"
+                self.sink.log("warn", f"Central sync failed ({detail}). Saved locally.")
+            except Exception as e:  # noqa: BLE001 -- network errors must not break stop
+                self.sink.log("warn", f"Central sync failed ({e}). Saved locally.")
+
+        threading.Thread(target=_push, daemon=True, name="meeting-sync").start()
 
     # --- meeting edits: route the live meeting through its in-memory object (which autosaves
     # on every utterance and would otherwise clobber a direct disk write); past ones via the store ---  # noqa: E501
@@ -540,12 +581,23 @@ def main(
         config.MT_CONTEXT_SENTENCES, help="Prior sentences as translation context (0=off)"
     ),
     audiotee: str | None = typer.Option(None, help="Path to the audiotee binary"),
+    sync_url: str | None = typer.Option(
+        None, "--sync-url",
+        help="Central server URL to push finished meetings to (or set env LC_SYNC_URL)",
+    ),
+    sync_token: str | None = typer.Option(
+        None, "--sync-token",
+        help="Your agent API token for the central server (or set env LC_SYNC_TOKEN)",
+    ),
 ) -> None:
     mt_model_id = _resolve_mt(mt_model)
     if default_lang not in LANG_PRESETS:
         console.print(f"[red]--default-lang must be one of: {', '.join(LANG_PRESETS)}[/red]")
         raise typer.Exit(1)
     presets = _resolve_presets()
+    # sync config: CLI flag wins, else env var, else off (local-only)
+    sync_url = sync_url or os.environ.get("LC_SYNC_URL", "")
+    sync_token = sync_token or os.environ.get("LC_SYNC_TOKEN", "")
 
     sink = WebSink()
     store = MeetingStore(_MEETINGS_DIR)
@@ -559,6 +611,8 @@ def main(
         mt_model_id=mt_model_id,
         context=context,
         audiotee_path=audiotee,
+        sync_url=sync_url,
+        sync_token=sync_token,
     )
 
     # surface the deep-in-the-stack system-audio silence warning to the browser banner
@@ -572,6 +626,12 @@ def main(
     url = f"http://{host}:{port}"
     console.print(f"[bold green]livecaption web[/bold green] → {url}")
     console.print("[dim]Open the page, pick a source, and click Start. Ctrl-C here to quit.[/dim]")
+    if sync_url and sync_token:
+        console.print(f"[dim]Central sync ON → finished meetings push to {sync_url}[/dim]")
+    elif sync_url or sync_token:
+        console.print(
+            "[yellow]Central sync needs BOTH --sync-url and --sync-token; sync is OFF.[/yellow]"
+        )
     if open_browser:
         threading.Timer(0.5, lambda: webbrowser.open(url)).start()
 
