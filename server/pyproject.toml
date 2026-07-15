@@ -1,0 +1,30 @@
+[project]
+name = "livecaption-server"
+version = "0.1.0"
+description = "Central meeting-records server for livecaption: multi-user accounts, shared library, ingest from local Mac capture agents. Runs anywhere (no MLX / no GPU needed)."
+requires-python = ">=3.10"
+dependencies = [
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.29",
+    "python-multipart>=0.0.9",
+    "itsdangerous>=2.0",          # required by Starlette's SessionMiddleware (signed cookies)
+]
+
+[project.scripts]
+livecaption-server = "livecaption_server.app:run"
+livecaption-server-admin = "livecaption_server.manage:run"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM", "BLE", "ANN0"]
+
+[tool.ruff.lint.flake8-bugbear]
+# FastAPI declares dependencies / body / header params by calling these in argument defaults
+extend-immutable-calls = ["fastapi.Depends", "fastapi.Body", "fastapi.Header", "fastapi.Query"]

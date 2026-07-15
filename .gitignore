@@ -12,3 +12,22 @@ wheels/
 # audiotee 编译产物（用 scripts/build_audiotee.sh 重建）
 bin/
 .vendor/
+
+# ---- Runtime data & secrets: NEVER commit (may contain meeting content / company info /
+# credentials). This is a PUBLIC repo — keep all data out of it. ----
+# databases (central server stores users + meetings here)
+*.db
+*.db-journal
+*.db-wal
+*.sqlite
+*.sqlite3
+# env / secrets
+.env
+.env.*
+*.secret
+secret_key*
+# data / upload / meeting-store directories
+data/
+server/data/
+meetings/
+transcripts/

@@ -1,0 +1,249 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>livecaption · meetings</title>
+<style>
+  :root {
+    --bg:#0f1115; --panel:#171a21; --panel2:#12151b; --border:#2a2f3a; --fg:#e6e8ec;
+    --muted:#8b93a1; --ts:#6b7480; --zh:#7fd4e6; --accent:#4c8dff; --sel:#223052; --danger:#ff5a5a;
+    --m1:#e05fd0; --m2:#ffa23a; --m3:#ff5a5a; --m4:#ff8db0;
+    --t1:#5b9dff; --t2:#b98cff; --t3:#7d8cff; --t4:#98a6c8;
+    --badge-me-bg:#3a2a12; --badge-me-fg:#ffbf6b; --badge-them-bg:#16294a; --badge-them-fg:#7fb0ff;
+    --chip:#223052; --chip-fg:#9db4e6;
+  }
+  @media (prefers-color-scheme: light) {
+    :root {
+      --bg:#f7f8fa; --panel:#fff; --panel2:#f0f2f5; --border:#e2e5ea; --fg:#1c2129;
+      --muted:#5b636f; --ts:#8b93a1; --zh:#0f6f88; --accent:#2f6fe0; --sel:#e4ecfb; --danger:#d12b2b;
+      --m1:#b5199e; --m2:#b8620a; --m3:#d12b2b; --m4:#c23a75;
+      --t1:#2f6fe0; --t2:#7a3fd0; --t3:#4351c8; --t4:#56627a;
+      --badge-me-bg:#fdeccf; --badge-me-fg:#8a5a00; --badge-them-bg:#dfe9ff; --badge-them-fg:#2551a0;
+      --chip:#dfe9ff; --chip-fg:#2551a0;
+    }
+  }
+  * { box-sizing:border-box; }
+  html,body { height:100%; margin:0; }
+  body { background:var(--bg); color:var(--fg); font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; display:flex; flex-direction:column; height:100vh; }
+  header { display:flex; align-items:center; gap:12px; padding:10px 16px; background:var(--panel); border-bottom:1px solid var(--border); }
+  h1 { font-size:15px; font-weight:700; margin:0; }
+  h1 .dot { color:var(--muted); font-weight:400; }
+  .spacer { flex:1; }
+  #who { color:var(--muted); font-size:13px; }
+  button.link { background:none; border:0; color:var(--accent); font:inherit; font-size:13px; cursor:pointer; padding:0; }
+  button.link:hover { text-decoration:underline; }
+  button.link.danger { color:var(--danger); }
+
+  /* login */
+  #login { position:fixed; inset:0; background:var(--bg); display:none; align-items:center; justify-content:center; z-index:10; }
+  #login.show { display:flex; }
+  .card { background:var(--panel); border:1px solid var(--border); border-radius:12px; padding:28px; width:320px; }
+  .card h2 { margin:0 0 4px; font-size:18px; }
+  .card p { margin:0 0 18px; color:var(--muted); font-size:13px; }
+  .card input { width:100%; padding:9px 11px; margin-bottom:10px; border:1px solid var(--border); border-radius:8px; background:var(--bg); color:var(--fg); font:inherit; }
+  .card button.primary { width:100%; padding:9px; border:0; border-radius:8px; background:var(--accent); color:#fff; font:inherit; font-weight:600; cursor:pointer; }
+  .card .err { color:var(--danger); font-size:13px; min-height:18px; margin-top:8px; }
+
+  #body { flex:1; display:flex; min-height:0; }
+  #sidebar { width:264px; background:var(--panel2); border-right:1px solid var(--border); display:flex; flex-direction:column; min-height:0; }
+  #search { margin:10px; padding:7px 10px; border:1px solid var(--border); border-radius:8px; background:var(--bg); color:var(--fg); font:inherit; font-size:13px; }
+  #list { overflow-y:auto; flex:1; padding:0 6px 10px; }
+  .mi { padding:8px 10px; border-radius:8px; cursor:pointer; margin-bottom:2px; }
+  .mi:hover { background:var(--border); }
+  .mi.sel { background:var(--sel); }
+  .mi .t { font-size:13.5px; font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .mi .m { font-size:11.5px; color:var(--muted); margin-top:1px; }
+  .chip { display:inline-block; font-size:10px; font-weight:700; padding:0 6px; border-radius:4px; background:var(--chip); color:var(--chip-fg); margin-right:5px; vertical-align:1px; }
+  .snip { font-size:11.5px; color:var(--muted); margin-top:2px; font-style:italic; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .listempty { color:var(--muted); font-size:13px; padding:12px; text-align:center; }
+
+  #pane { flex:1; display:flex; flex-direction:column; min-width:0; }
+  #vh { padding:12px 16px 10px; border-bottom:1px solid var(--border); }
+  #title { font-size:18px; font-weight:700; border:1px solid transparent; border-radius:6px; background:transparent; color:var(--fg); font-family:inherit; padding:3px 6px; width:100%; }
+  #title:not([readonly]):hover { border-color:var(--border); }
+  #title:focus { border-color:var(--accent); outline:none; background:var(--bg); }
+  #vmeta { display:flex; align-items:center; gap:12px; margin-top:6px; font-size:12.5px; color:var(--muted); padding-left:6px; flex-wrap:wrap; }
+  #vmeta a, #vmeta button { color:var(--accent); font-size:12.5px; text-decoration:none; background:none; border:0; cursor:pointer; font-family:inherit; padding:0; }
+  #vmeta button.danger { color:var(--danger); }
+  #content { flex:1; display:flex; min-height:0; }
+  #scroll { flex:1; overflow-y:auto; padding:16px; min-width:0; }
+  #notespanel { width:300px; border-left:1px solid var(--border); display:flex; flex-direction:column; background:var(--panel2); }
+  .nhead { padding:10px 14px; font-size:12px; font-weight:700; color:var(--muted); letter-spacing:.5px; text-transform:uppercase; border-bottom:1px solid var(--border); display:flex; justify-content:space-between; }
+  .nhead .saved { font-weight:400; text-transform:none; letter-spacing:0; }
+  #notes { flex:1; border:0; resize:none; background:transparent; color:var(--fg); font:inherit; padding:12px 14px; outline:none; }
+  #notes[readonly] { color:var(--muted); }
+  .u { margin:0 0 14px; }
+  .ts { color:var(--ts); font-variant-numeric:tabular-nums; margin-right:8px; font-size:13px; }
+  .badge { display:none; font-size:11px; font-weight:700; padding:1px 7px; border-radius:5px; margin-right:8px; vertical-align:1px; }
+  .doc.multi .badge { display:inline-block; }
+  .badge.me { background:var(--badge-me-bg); color:var(--badge-me-fg); }
+  .badge.them { background:var(--badge-them-bg); color:var(--badge-them-fg); }
+  .zh { color:var(--zh); font-weight:600; margin-top:2px; }
+  .sp { font-weight:700; margin-right:4px; }
+  .sp.me.s0{color:var(--m1)} .sp.me.s1{color:var(--m2)} .sp.me.s2{color:var(--m3)} .sp.me.s3{color:var(--m4)}
+  .sp.them.s0{color:var(--t1)} .sp.them.s1{color:var(--t2)} .sp.them.s2{color:var(--t3)} .sp.them.s3{color:var(--t4)}
+  .del{color:var(--muted); text-decoration:line-through} .add{color:#46c25e; font-weight:600}
+  .empty { color:var(--muted); text-align:center; margin-top:16vh; font-size:14px; }
+</style>
+</head>
+<body>
+<div id="login">
+  <form class="card" id="loginform">
+    <h2>livecaption</h2>
+    <p>Sign in to your meeting library.</p>
+    <input id="u" placeholder="Username" autocomplete="username">
+    <input id="p" type="password" placeholder="Password" autocomplete="current-password">
+    <button class="primary" type="submit">Sign in</button>
+    <div class="err" id="loginerr"></div>
+  </form>
+</div>
+
+<header>
+  <h1>livecaption <span class="dot">· meetings</span></h1>
+  <div class="spacer"></div>
+  <span id="who"></span>
+  <button class="link" id="logout">Log out</button>
+</header>
+
+<div id="body">
+  <aside id="sidebar">
+    <input id="search" type="search" placeholder="Search meetings…">
+    <div id="list"></div>
+  </aside>
+  <section id="pane">
+    <div id="vh">
+      <input id="title" placeholder="Untitled meeting" readonly>
+      <div id="vmeta">
+        <span id="metatext"></span>
+        <span class="spacer"></span>
+        <button id="shareBtn" style="display:none">Share</button>
+        <button id="pubBtn" style="display:none">Make team-visible</button>
+        <a id="export" href="#">Export ↓</a>
+        <button id="delete" class="danger" style="display:none">Delete</button>
+      </div>
+    </div>
+    <div id="content">
+      <div id="scroll">
+        <div id="doc" class="doc"></div>
+        <div class="empty" id="empty">Select a meeting on the left.</div>
+      </div>
+      <div id="notespanel">
+        <div class="nhead"><span>Notes</span><span class="saved" id="notesaved"></span></div>
+        <textarea id="notes" placeholder="Notes…" readonly></textarea>
+      </div>
+    </div>
+  </section>
+</div>
+
+<script>
+(function () {
+  "use strict";
+  const $ = (s) => document.querySelector(s);
+  const api = {
+    get: (p) => fetch(p).then(r => r.ok ? r.json() : Promise.reject(r.status)),
+    post: (p, b) => fetch(p, {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(b||{})}).then(r=>r.json()),
+    del: (p) => fetch(p, {method:"DELETE"}).then(r=>r.json()),
+  };
+  const st = { user:null, selected:null, meetings:[] };
+
+  // ---- render helpers (shared shape with the Mac capture UI) ----
+  const sideOf = (l)=> l==="them" ? "them":"me";
+  const cssId = (k)=> k.replace(/[^a-zA-Z0-9_-]/g,"_");
+  function badge(side){ const b=document.createElement("span"); b.className="badge "+side; b.textContent=side==="them"?"线上":"现场"; return b; }
+  function spk(s, side){ if(s==null) return null; const e=document.createElement("span"); e.className="sp "+side+" s"+(s%4); e.textContent="S"+(s+1)+" "; return e; }
+  function renderEn(c, segs, side){ c.textContent=""; segs.forEach((seg,i)=>{ if(i)c.appendChild(document.createTextNode("  ")); const s=spk(seg.speaker,side); if(s)c.appendChild(s); if(seg.diff){ seg.diff.forEach(([k,w])=>{ if(k==="same")c.appendChild(document.createTextNode(w)); else { const x=document.createElement("span"); x.className=k==="del"?"del":"add"; x.textContent=w; c.appendChild(x);} }); } else c.appendChild(document.createTextNode(seg.text)); }); }
+  function renderZh(c, segs, side){ c.textContent=""; segs.forEach((seg,i)=>{ if(i)c.appendChild(document.createTextNode("  ")); const s=spk(seg.speaker,side); if(s)c.appendChild(s); c.appendChild(document.createTextNode(seg.zh)); }); }
+  function utter(u){ const side=sideOf(u.label); const el=document.createElement("div"); el.className="u"; el.id="u-"+cssId(u.key||(u.at+u.label)); const en=document.createElement("div"); en.className="en"; const ts=document.createElement("span"); ts.className="ts"; ts.textContent=u.at; en.appendChild(ts); en.appendChild(badge(side)); const b=document.createElement("span"); en.appendChild(b); renderEn(b,u.en||[],side); const zh=document.createElement("div"); zh.className="zh"; if(u.zh) renderZh(zh,u.zh,side); el.appendChild(en); el.appendChild(zh); return el; }
+  const fmtDate = (iso)=> iso ? iso.replace("T"," ").slice(5,16) : "";
+
+  // ---- login ----
+  const loginBox=$("#login");
+  function showLogin(){ loginBox.classList.add("show"); }
+  function hideLogin(){ loginBox.classList.remove("show"); }
+  $("#loginform").addEventListener("submit", async (e)=>{
+    e.preventDefault();
+    const r = await api.post("/api/login", {username:$("#u").value, password:$("#p").value}).catch(()=>({}));
+    if(r.ok){ $("#p").value=""; $("#loginerr").textContent=""; boot(); }
+    else $("#loginerr").textContent = "Wrong username or password.";
+  });
+  $("#logout").addEventListener("click", async ()=>{ await api.post("/api/logout",{}); location.reload(); });
+
+  // ---- library ----
+  function renderList(items, isSearch){
+    const el=$("#list"); el.textContent="";
+    if(!items.length){ const e=document.createElement("div"); e.className="listempty"; e.textContent=isSearch?"No matches.":"No meetings yet."; el.appendChild(e); return; }
+    items.forEach(m=>{
+      const d=document.createElement("div"); d.className="mi"+(m.id===st.selected?" sel":"");
+      const t=document.createElement("div"); t.className="t"; t.textContent=m.title||m.id; d.appendChild(t);
+      const meta=document.createElement("div"); meta.className="m";
+      if(!m.owned){ const c=document.createElement("span"); c.className="chip"; c.textContent = m.visibility==="public"?"TEAM":"SHARED"; meta.appendChild(c); }
+      else if(m.visibility==="public"){ const c=document.createElement("span"); c.className="chip"; c.textContent="TEAM"; meta.appendChild(c); }
+      meta.appendChild(document.createTextNode(fmtDate(m.created_at)+" · "+(m.utterances||0)+(m.lang_label?" · "+m.lang_label:"")));
+      d.appendChild(meta);
+      if(m.snippet){ const s=document.createElement("div"); s.className="snip"; s.textContent=m.snippet; d.appendChild(s); }
+      d.addEventListener("click", ()=>select(m.id));
+      el.appendChild(d);
+    });
+  }
+  async function refresh(){ const r=await api.get("/api/meetings").catch(()=>({meetings:[]})); st.meetings=r.meetings||[]; if(!$("#search").value.trim()) renderList(st.meetings,false); }
+
+  async function select(id){
+    st.selected=id;
+    const m = await api.get("/api/meetings/"+id).catch(()=>null);
+    if(!m) return;
+    $("#empty").style.display="none";
+    $("#title").value=m.title||"";
+    $("#title").readOnly = !m.owned;
+    const meta=[fmtDate(m.created_at)]; if(m.source)meta.push(m.source); if(m.lang_label)meta.push(m.lang_label);
+    meta.push((m.utterances||[]).length+" lines"); if(!m.owned)meta.push("by "+(m.owner||"?"));
+    if(m.owned && m.visibility==="public") meta.push("team-visible");
+    if(m.owned && m.shared_with && m.shared_with.length) meta.push("shared: "+m.shared_with.join(", "));
+    $("#metatext").textContent=meta.join(" · ");
+    $("#export").href="/api/meetings/"+id+"/export.md";
+    $("#delete").style.display = m.owned?"":"none";
+    $("#shareBtn").style.display = m.owned?"":"none";
+    $("#pubBtn").style.display = m.owned?"":"none";
+    $("#pubBtn").textContent = m.visibility==="public" ? "Make private" : "Make team-visible";
+    $("#notes").value=m.notes||""; $("#notes").readOnly=!m.owned; $("#notesaved").textContent="";
+    const doc=$("#doc"); doc.textContent=""; doc.classList.toggle("multi", m.source==="both");
+    (m.utterances||[]).forEach(u=>doc.appendChild(utter(u)));
+    if(!(m.utterances||[]).length){ const e=document.createElement("div"); e.className="empty"; e.textContent="No transcript."; doc.appendChild(e); }
+    Array.from($("#list").children).forEach(c=>{ const t=c.querySelector(".t"); c.classList.toggle("sel", t && t.textContent===(m.title||id)); });
+  }
+
+  // notes autosave (owner only)
+  let notesTimer=null;
+  $("#notes").addEventListener("input", ()=>{
+    if(!st.selected || $("#notes").readOnly) return;
+    $("#notesaved").textContent="saving…"; if(notesTimer)clearTimeout(notesTimer);
+    const id=st.selected, val=$("#notes").value;
+    notesTimer=setTimeout(async ()=>{ await api.post("/api/meetings/"+id+"/notes",{notes:val}); if(st.selected===id)$("#notesaved").textContent="saved"; }, 700);
+  });
+  // rename (owner only)
+  function saveTitle(){ if(!st.selected||$("#title").readOnly)return; api.post("/api/meetings/"+st.selected+"/rename",{title:$("#title").value}).then(refresh); }
+  $("#title").addEventListener("blur", saveTitle);
+  $("#title").addEventListener("keydown", e=>{ if(e.key==="Enter"){ e.preventDefault(); $("#title").blur(); }});
+  // delete
+  $("#delete").addEventListener("click", async ()=>{ if(!st.selected)return; if(!confirm("Delete this meeting?"))return; const r=await api.del("/api/meetings/"+st.selected); if(r.ok){ st.selected=null; $("#doc").textContent=""; $("#title").value=""; $("#notes").value=""; $("#metatext").textContent=""; $("#empty").style.display=""; await refresh(); if(st.meetings.length)select(st.meetings[0].id); } });
+  // share
+  $("#shareBtn").addEventListener("click", async ()=>{ if(!st.selected)return; const name=prompt("Share with which username? (blank to cancel)"); if(!name)return; const r=await api.post("/api/meetings/"+st.selected+"/share",{username:name.trim()}); if(r.ok) select(st.selected); else alert("No such user."); });
+  // visibility toggle
+  $("#pubBtn").addEventListener("click", async ()=>{ if(!st.selected)return; const makePublic = $("#pubBtn").textContent.indexOf("team")>=0; await api.post("/api/meetings/"+st.selected+"/visibility",{visibility: makePublic?"public":"private"}); select(st.selected); refresh(); });
+  // search
+  let searchTimer=null;
+  $("#search").addEventListener("input", ()=>{ if(searchTimer)clearTimeout(searchTimer); const q=$("#search").value.trim(); searchTimer=setTimeout(async ()=>{ if(!q){ renderList(st.meetings,false); return; } const r=await api.get("/api/search?q="+encodeURIComponent(q)); renderList(r.results||[], true); }, 250); });
+
+  async function boot(){
+    const me = await api.get("/api/me").catch(()=>null);
+    if(!me){ showLogin(); return; }
+    hideLogin();
+    st.user=me; $("#who").textContent=me.username;
+    await refresh();
+    if(st.meetings.length) select(st.meetings[0].id);
+  }
+  boot();
+})();
+</script>
+</body>
+</html>
