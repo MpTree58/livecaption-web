@@ -2,6 +2,8 @@
 
 # livecaption
 
+> **Attribution**: This is a fork of [six-ddc/livecaption](https://github.com/six-ddc/livecaption) (original author **six-ddc**). It adds a local web UI, a meeting-records system (library / full-text search / notes / Markdown export), and language presets (English / Chinese / mixed). The original project ships **no open-source license (LICENSE)** — by default this means "all rights reserved" and copyright remains with the original author; please obtain the author's permission before reusing.
+
 A command-line tool for real-time English transcription plus Chinese translation, running fully on-device on macOS. No UI; output goes to the terminal or a text file.
 
 ![livecaption demo: real-time transcription, S1/S2 speaker diarization (distinct colors), two-pass correction (red strikethrough for replaced words, green for the corrected words), and per-sentence Chinese translation](docs/demo.png)

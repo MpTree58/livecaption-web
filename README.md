@@ -2,6 +2,8 @@
 
 # livecaption
 
+> **Fork 说明 / Attribution**：本项目 fork 自 [six-ddc/livecaption](https://github.com/six-ddc/livecaption)（原作者 **six-ddc**），在其基础上增加了本地网页端界面、会议记录系统（会议库 / 全文搜索 / 笔记 / Markdown 导出）与多语言预设（英 / 中 / 中英混合）。原项目**未附带任何开源许可证（LICENSE）**——依据版权法默认「保留所有权利」，版权归原作者所有；如需复用请先征得原作者同意。
+
 macOS 本地实时英文转录 + 中文翻译的命令行工具，无 UI，输出到终端或文本文件。
 
 ![livecaption 演示：实时转录、S1/S2 说话人分离（不同颜色）、two-pass 纠偏（红色删除线为纠掉的词、绿色为纠正后的词）与逐句中文翻译](docs/demo.png)
