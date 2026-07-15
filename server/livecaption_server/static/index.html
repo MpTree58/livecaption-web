@@ -128,7 +128,7 @@
     <div id="list"></div>
   </aside>
   <section id="pane">
-    <div id="vh">
+    <div id="vh" style="display:none">
       <input id="title" placeholder="Untitled meeting" readonly>
       <div id="vmeta">
         <span id="metatext"></span>
@@ -144,7 +144,7 @@
         <div id="doc" class="doc"></div>
         <div class="empty" id="empty">Select a meeting on the left.</div>
       </div>
-      <div id="notespanel">
+      <div id="notespanel" style="display:none">
         <div class="nhead"><span>Notes</span><span class="saved" id="notesaved"></span></div>
         <textarea id="notes" placeholder="Notes…" readonly></textarea>
       </div>
@@ -216,10 +216,21 @@
   }
   async function refresh(){ const r=await api.get("/api/meetings").catch(()=>({meetings:[]})); st.meetings=r.meetings||[]; if(!$("#search").value.trim()) renderList(st.meetings,false); }
 
+  function clearView(){
+    st.selected=null;
+    $("#vh").style.display="none"; $("#notespanel").style.display="none";
+    $("#doc").textContent="";
+    const e=$("#empty"); e.style.display="";
+    e.innerHTML = 'No meetings yet.<br><span style="font-size:13px">Meetings show up here after you '
+      + 'record them on your Mac with <b>caption-web</b> (with sync configured). '
+      + 'See the server README for the two <code>LC_SYNC_*</code> settings.</span>';
+  }
+
   async function select(id){
-    st.selected=id;
     const m = await api.get("/api/meetings/"+id).catch(()=>null);
     if(!m) return;
+    st.selected=id;
+    $("#vh").style.display=""; $("#notespanel").style.display="";
     $("#empty").style.display="none";
     $("#title").value=m.title||"";
     $("#title").readOnly = !m.owned;
@@ -253,7 +264,7 @@
   $("#title").addEventListener("blur", saveTitle);
   $("#title").addEventListener("keydown", e=>{ if(e.key==="Enter"){ e.preventDefault(); $("#title").blur(); }});
   // delete
-  $("#delete").addEventListener("click", async ()=>{ if(!st.selected)return; if(!confirm("Delete this meeting?"))return; const r=await api.del("/api/meetings/"+st.selected); if(r.ok){ st.selected=null; $("#doc").textContent=""; $("#title").value=""; $("#notes").value=""; $("#metatext").textContent=""; $("#empty").style.display=""; await refresh(); if(st.meetings.length)select(st.meetings[0].id); } });
+  $("#delete").addEventListener("click", async ()=>{ if(!st.selected)return; if(!confirm("Delete this meeting?"))return; const r=await api.del("/api/meetings/"+st.selected); if(r.ok){ await refresh(); if(st.meetings.length)select(st.meetings[0].id); else clearView(); } });
   // share
   $("#shareBtn").addEventListener("click", async ()=>{ if(!st.selected)return; const name=prompt("Share with which username? (blank to cancel)"); if(!name)return; const r=await api.post("/api/meetings/"+st.selected+"/share",{username:name.trim()}); if(r.ok) select(st.selected); else alert("No such user."); });
   // visibility toggle
@@ -268,7 +279,7 @@
     hideLogin();
     st.user=me; $("#who").textContent=me.username;
     await refresh();
-    if(st.meetings.length) select(st.meetings[0].id);
+    if(st.meetings.length) select(st.meetings[0].id); else clearView();
   }
   boot();
 })();
