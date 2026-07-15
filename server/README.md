@@ -60,8 +60,14 @@ uv run livecaption-server-admin adduser <名字> --admin  # 建管理员
 uv run livecaption-server-admin listusers               # 列出所有用户 + 他们的 token
 uv run livecaption-server-admin token <名字>            # 查某人的 token
 uv run livecaption-server-admin token <名字> --regen    # 重置某人的 token
-uv run livecaption-server-admin passwd <名字>           # 改某人的密码
+uv run livecaption-server-admin passwd <名字>           # 管理员帮某人改密码
+# 删用户（离职移除）。若此人名下还有会议，必须二选一：
+uv run livecaption-server-admin deluser <名字> --transfer <另一个人>   # 把 TA 的会议转给别人后删
+uv run livecaption-server-admin deluser <名字> --purge                # 连 TA 的会议一起删
 ```
+
+> **注册是白名单制**：没有网页自助注册，账户只能管理员用上面的 `adduser` 开。
+> **用户可自己改密码**：登录后点右上角「Password」即可改自己的密码（不用找管理员）。
 
 ## 四、每个人的 Mac 怎么连上来（采集端）
 
