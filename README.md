@@ -24,6 +24,16 @@ ASR 和翻译都跑 Apple GPU（统一内存）；VAD 把静音段挡在 encoder
 
 ## 安装
 
+**不想碰命令行？一键装成 macOS 菜单栏 App**（🎙 常驻菜单栏，点击即用，纯本地、无账户）——在终端粘贴这一条即可，装完再也不用打开终端：
+
+```bash
+curl -LsSf https://raw.githubusercontent.com/MpTree58/livecaption-web/main/scripts/install_app.sh | bash
+```
+
+它会自动装好一切并创建 `/Applications/livecaption.app`（默认随登录自启，`| bash -s -- --no-login` 可关；`--uninstall` 卸载）。之后点菜单栏 🎙 → "Open livecaption" 就能录制和浏览会议。
+
+命令行手动安装：
+
 ```bash
 uv sync
 # 仅在需要捕获会议/系统音频时，编译 audiotee：

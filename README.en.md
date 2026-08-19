@@ -24,6 +24,16 @@ Both ASR and translation run on the Apple GPU (unified memory); the VAD keeps si
 
 ## Installation
 
+**Don't want a terminal? One-line install as a macOS menu-bar app** (🎙 lives in the menu bar; local-only, no accounts) — paste this once in Terminal and never open it again:
+
+```bash
+curl -LsSf https://raw.githubusercontent.com/MpTree58/livecaption-web/main/scripts/install_app.sh | bash
+```
+
+It sets everything up and creates `/Applications/livecaption.app` (auto-starts at login by default; `| bash -s -- --no-login` to skip, `--uninstall` to remove). Then click the menu-bar 🎙 → "Open livecaption" to record and browse meetings.
+
+Manual command-line install:
+
 ```bash
 uv sync
 # Only when you need to capture meeting/system audio, build audiotee:
