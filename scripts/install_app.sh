@@ -6,8 +6,9 @@
 #   2. clones (or updates) the repo into ~/livecaption   [skipped when run from a checkout]
 #   3. installs Python dependencies (uv sync --extra app)
 #   4. builds audiotee (system-audio capture) if possible
-#   5. creates /Applications/livecaption.app  -> menu-bar 🎙 app, no terminal ever again
-#   6. (default) installs a login item so the app starts automatically at login
+#   5. pre-downloads the speech/translation models (~6GB, with progress bars)
+#   6. creates /Applications/livecaption.app  -> menu-bar 🎙 app, no terminal ever again
+#   7. (default) installs a login item so the app starts automatically at login
 #
 # Usage:
 #   curl -LsSf https://raw.githubusercontent.com/MpTree58/livecaption-web/main/scripts/install_app.sh | bash
@@ -107,7 +108,14 @@ else
         || warn "audiotee build failed — the mic still works; re-run scripts/build_audiotee.sh later for system audio"
 fi
 
-# --- 5. the .app bundle -----------------------------------------------------
+# --- 5. models --------------------------------------------------------------
+# Download the speech/translation models NOW, with visible progress bars, instead of
+# leaving the first in-app Start stuck on a progress-less "Starting…" for ~6GB.
+say "Downloading speech models (one-time, ~6GB; resumable if interrupted)"
+(cd "$LC_DIR" && uv run --frozen --extra app --extra qwen python -m livecaption.prefetch) \
+    || warn "model download incomplete — the app still works; the first Start will fetch the rest"
+
+# --- 6. the .app bundle -----------------------------------------------------
 say "Creating $APP_DIR"
 rm -rf "$APP_DIR"
 mkdir -p "$APP_DIR/Contents/MacOS"
@@ -147,7 +155,7 @@ exec uv run --frozen --extra app --extra qwen livecaption-app
 LAUNCH
 chmod +x "$APP_DIR/Contents/MacOS/$APP_NAME"
 
-# --- 6. login item ----------------------------------------------------------
+# --- 7. login item ----------------------------------------------------------
 if [ "$INSTALL_LOGIN" = 1 ]; then
     say "Installing login item (the app starts automatically when you log in)"
     mkdir -p "$HOME/Library/LaunchAgents"
@@ -174,7 +182,7 @@ say "Done! Look for the 🎙 icon in the menu bar (top-right of the screen)."
 echo "    Click it -> 'Open livecaption' to record and browse your meetings."
 echo "    (If it's not there yet, open it once from Launchpad / Applications.)"
 echo
-echo "    First recording downloads the speech models (a few GB) — one-time wait."
+echo "    Models are already downloaded — the first recording starts right away."
 echo
 echo "    To also caption the OTHER side of a meeting (system audio), grant permission once:"
 echo "      System Settings > Privacy & Security > Screen & System Audio Recording"
