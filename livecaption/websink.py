@@ -66,6 +66,9 @@ class WebSink:
         # refresh re-syncs the Start/Stop button and source without waiting for the next event.
         self._status: dict = {"type": "status", "state": "idle", "source": None,
                               "meeting": None, "lang": None}
+        # Latest model-preparation progress, also replayed on connect: a first Start can spend
+        # many minutes downloading models, and a page opened mid-download must show it too.
+        self._progress: dict | None = None
 
     # --- subscription management (called from HTTP request threads) ---
     def subscribe(self) -> queue.Queue:
@@ -75,6 +78,8 @@ class WebSink:
             # prime the new connection with current status so the UI reflects a run already
             # in progress
             self._offer(q, self._status)
+            if self._progress is not None:
+                self._offer(q, self._progress)
         return q
 
     def unsubscribe(self, q: queue.Queue) -> None:
@@ -162,6 +167,19 @@ class WebSink:
               "lang": lang}
         with self._lock:
             self._status = ev
+            if state != "starting":  # progress is a starting-phase artifact
+                self._progress = None
+            for q in self._subs:
+                self._offer(q, ev)
+
+    def progress(self, message: str | None, pct: float | None = None) -> None:
+        """Model-preparation progress while the pipeline is starting. Unlike log banners
+        (which auto-hide), the browser shows this persistently until the run is listening —
+        it is the only feedback during a multi-GB first-time model download. message=None
+        clears the indicator; pct is 0–100 or None when the total is unknown."""
+        ev = {"type": "progress", "message": message, "pct": pct}
+        with self._lock:
+            self._progress = ev if message is not None else None
             for q in self._subs:
                 self._offer(q, ev)
 

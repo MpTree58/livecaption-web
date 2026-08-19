@@ -57,6 +57,9 @@
   .spacer { flex: 1; }
   label.chk { color: var(--muted); font-size: 13px; display: inline-flex; align-items: center; gap: 5px; cursor: pointer; }
   #banner { display: none; padding: 8px 16px; background: var(--warnbg); color: var(--warn); border-bottom: 1px solid var(--border); font-size: 13px; }
+  #progress { display: none; padding: 8px 16px; background: var(--panel); color: var(--muted); border-bottom: 1px solid var(--border); font-size: 13px; }
+  #progress .bar { height: 4px; background: var(--panel2); border: 1px solid var(--border); border-radius: 3px; margin-top: 6px; overflow: hidden; }
+  #progress .bar i { display: block; height: 100%; width: 0%; background: var(--accent); transition: width .6s; }
 
   #body { flex: 1; display: flex; min-height: 0; }
   /* --- sidebar --- */
@@ -123,6 +126,10 @@
   <label class="chk"><input type="checkbox" id="autochk" checked> auto-scroll</label>
 </header>
 <div id="banner"></div>
+<div id="progress">
+  <span id="progresstext"></span>
+  <div class="bar"><i id="progressfill"></i></div>
+</div>
 
 <div id="body">
   <aside id="sidebar">
@@ -160,6 +167,7 @@
   const $ = (s) => document.querySelector(s);
   const scroll = $("#scroll"), livedoc = $("#livedoc"), livepartials = $("#livepartials");
   const pastdoc = $("#pastdoc"), empty = $("#empty"), banner = $("#banner");
+  const progressEl = $("#progress"), progressText = $("#progresstext"), progressFill = $("#progressfill");
   const toggle = $("#toggle"), statusEl = $("#status"), statusText = $("#statustext");
   const sourceBtns = Array.from(document.querySelectorAll("#source button"));
   const diffChk = $("#diffchk"), autoChk = $("#autochk");
@@ -428,14 +436,26 @@
         case "translation": applyTranslation(ev); break;
         case "flush": flushPending(); break;
         case "status": onStatus(ev); break;
+        case "progress": showProgress(ev); break;
         case "log": showBanner(ev.level, ev.message); break;
       }
     };
     es.onerror = () => {};
   }
 
+  function showProgress(ev) {
+    // Persistent model-preparation feedback while "Starting…" (downloads can take many
+    // minutes; log banners auto-hide and would leave the user staring at nothing).
+    if (!ev.message) { progressEl.style.display = "none"; return; }
+    progressEl.style.display = "block";
+    progressText.textContent = ev.pct != null ? `${ev.message} (${Math.round(ev.pct)}%)` : ev.message;
+    progressFill.style.width = (ev.pct != null ? ev.pct : 0) + "%";
+    progressFill.parentElement.style.display = ev.pct != null ? "block" : "none";
+  }
+
   function setStatusPill(state) {
     st.running = (state === "listening" || state === "starting" || state === "stopping");
+    if (state !== "starting") progressEl.style.display = "none";
     statusEl.className = state; statusText.textContent = state;
     toggle.textContent = (state === "idle") ? "Start"
       : (state === "starting" ? "Starting…" : (state === "stopping" ? "Stopping…" : "Stop"));

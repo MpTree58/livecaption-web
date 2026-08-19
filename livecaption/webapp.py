@@ -25,6 +25,9 @@ from pathlib import Path
 from queue import Empty
 
 import typer
+from huggingface_hub import HfApi, snapshot_download
+from huggingface_hub import constants as hf_constants
+from huggingface_hub.constants import HF_HUB_CACHE, HF_XET_CACHE
 from rich.console import Console
 
 from . import config
@@ -37,6 +40,14 @@ from .translate import Translator
 from .websink import WebSink, _key
 
 console = Console()
+
+# Make model downloads observable: hf's default xet transfer stages bytes opaquely
+# (in-memory reconstruction; files appear only when finished), so the web UI's byte-level
+# progress poller (_download_model) would show ~0% for the entire download. The classic
+# HTTP path grows blobs/*.incomplete on disk, which the poller can measure. The env-frozen
+# constant is re-read per download call (verified in huggingface_hub 1.18
+# file_download.py), so overriding the attribute here disables xet for this process only.
+hf_constants.HF_HUB_DISABLE_XET = True
 
 _WEBUI = Path(__file__).with_name("webui.html")
 _MEETINGS_DIR = Path.home() / ".cache" / "livecaption" / "meetings"
@@ -154,6 +165,29 @@ class Session:
         self.sink.translation(label, zh_segments, started_at)
 
     # --- pipeline construction (cached per config so switching language stays warm) ---
+    def _stage(self, message: str) -> None:
+        """A model-preparation stage notice, shown on the persistent progress line (not the
+        auto-hiding banner — during a long first start that line is the user's only feedback,
+        and mirroring it into the banner just paints the same text twice)."""
+        self.sink.progress(message)
+
+    def _prepare_models(self, preset: dict) -> None:
+        """Download this run's models into the HF cache before loading, with visible progress.
+        Without this, a first Start on a fresh machine downloads several GB behind a bare
+        'Starting…'. Warm caches skip straight through (offline-safe); a failed download is
+        only warned about here — the loader below retries and its failure ends the start."""
+        repos = [(preset["asr_model_id"], "speech model"), (config.VAD_MODEL, "voice detector")]
+        if self._diarize:
+            repos.append((config.DIAR_MODEL, "speaker model"))
+        if self._translate:
+            repos.append((self._mt_model_id, "translation model"))
+        for i, (repo, what) in enumerate(repos, 1):
+            try:
+                _download_model(repo, f"Downloading {what} ({i}/{len(repos)})",
+                                self.sink.progress)
+            except Exception as e:  # noqa: BLE001 -- e.g. offline: let the cache-based load decide
+                self.sink.log("warn", f"Could not download {repo}: {e}")
+
     def _get_recognizer(self, preset: dict) -> object:
         key = "|".join([
             preset["backend"], preset["asr_model_id"], preset["asr_lang"],
@@ -161,19 +195,19 @@ class Session:
         ])
         rec = self._recognizers.get(key)
         if rec is None:
-            self.sink.log("info", f"Loading ASR model for {preset['label']} …")
+            self._stage(f"Loading ASR model for {preset['label']} …")
             if preset["backend"] == "qwen3":
                 from .asr_qwen import build_qwen_recognizer
 
                 rec = build_qwen_recognizer(
                     preset["asr_model_id"], preset["asr_lang"], self._diarize,
                     self._diarize and preset["word_diarize"],
-                    log=lambda m: self.sink.log("info", m),
+                    log=self._stage,
                 )
             else:
                 rec = build_recognizer(
                     preset["asr_model_id"], preset["asr_lang"], self._diarize,
-                    log=lambda m: self.sink.log("info", m),
+                    log=self._stage,
                 )
             self._recognizers[key] = rec
         return rec
@@ -207,6 +241,7 @@ class Session:
     def _start_impl(self, source_kind: str, lang: str) -> None:
         try:
             preset = self._presets[lang]
+            self._prepare_models(preset)
             recognizer = self._get_recognizer(preset)
             translator = self._get_translator(preset["target_prompt"]) if self._translate else None
             if translator is not None:
@@ -527,6 +562,70 @@ class _StderrTee:
 
     def __getattr__(self, name):  # noqa: ANN001 -- delegate isatty/encoding/etc.
         return getattr(self._real, name)
+
+
+def _dir_bytes(root: Path) -> int:
+    total = 0
+    if root.is_dir():
+        for f in root.rglob("*"):
+            try:
+                if f.is_file():
+                    total += f.stat().st_size
+            except OSError:
+                continue
+    return total
+
+
+def _download_bytes_so_far(repo: str, xet_baseline: int) -> int:
+    """Bytes of `repo` on disk so far. hf's xet transfer stages chunks in the shared
+    HF_XET_CACHE and only materializes the repo blob at the end, so the repo dir alone
+    sits near zero for the whole download — count the repo dir (absolute, covers resumed
+    plain-HTTP .incomplete blobs) plus the xet cache's growth since this download began."""
+    repo_dir = Path(HF_HUB_CACHE) / f"models--{repo.replace('/', '--')}"
+    return _dir_bytes(repo_dir) + max(0, _dir_bytes(Path(HF_XET_CACHE)) - xet_baseline)
+
+
+def _fmt_bytes(n: float) -> str:
+    return f"{n / 1e9:.1f} GB" if n >= 1e9 else f"{n / 1e6:.0f} MB"
+
+
+def _download_model(repo: str, label: str, progress) -> None:  # noqa: ANN001 -- progress = WebSink.progress
+    """Ensure `repo` is fully in the local HF cache, reporting byte-level progress via
+    `progress(message, pct)`. Fully-cached repos return instantly and offline (no progress
+    noise, no network). snapshot_download gives no usable per-byte hook, so a poller thread
+    measures the cache directory growing against the total size from the hub's metadata."""
+    try:
+        snapshot_download(repo, local_files_only=True)
+        return
+    except Exception:  # noqa: BLE001 -- any miss/corruption just means: download below
+        pass
+
+    progress(f"{label}…", None)
+    try:
+        info = HfApi().model_info(repo, files_metadata=True)
+        total = sum(s.size for s in info.siblings if s.size) or None
+    except Exception:  # noqa: BLE001 -- metadata is progress-only sugar, never a blocker
+        total = None
+
+    stop = threading.Event()
+    xet_baseline = _dir_bytes(Path(HF_XET_CACHE))
+
+    def poll() -> None:
+        while not stop.wait(1.0):
+            done = _download_bytes_so_far(repo, xet_baseline)
+            if total:
+                pct = min(99.0, done / total * 100)
+                progress(f"{label} — {_fmt_bytes(min(done, total))} / {_fmt_bytes(total)}", pct)
+            else:
+                progress(f"{label} — {_fmt_bytes(done)} so far", None)
+
+    poller = threading.Thread(target=poll, daemon=True, name="model-dl-progress")
+    poller.start()
+    try:
+        snapshot_download(repo)
+    finally:
+        stop.set()
+        poller.join(timeout=2)
 
 
 def _resolve_asr(asr_model: str) -> tuple[str, str]:
