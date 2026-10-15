@@ -22,6 +22,7 @@ uv run python scripts/smoke_diff.py          # _inline_diff 纯逻辑测试（�
 uv run python scripts/smoke_mel.py           # 增量 mel 与整句一次性计算的一致性（改 _mel_grow 后必跑）
 uv run python scripts/diag_system_audio.py   # 系统音频 / 权限自检（播放声音看能否捕获到非零数据）
 uv run --extra qwen python scripts/smoke_model_swap.py  # 网页端切换语言预设后旧模型是否释放（真模型 + say 合成音频冒充麦克风，临时会议库）
+uv run python scripts/smoke_web_session.py   # 网页端 start/stop 边界情况（Stop 不丢最后几句翻译等；同上用合成音频）
 uvx ruff check .                             # lint（规则集见 pyproject）
 ```
 

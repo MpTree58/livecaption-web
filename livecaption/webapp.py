@@ -347,6 +347,13 @@ class Session:
             worker.join(timeout=15)
             if worker.is_alive():
                 self.sink.log("warn", f"ASR worker '{worker.label}' did not finish in time.")
+        # the last finals were only just handed to the translator: let it catch up before
+        # closing the meeting, or those lines would be saved without their translation
+        tr = self._translator
+        if self._meeting is not None and tr is not None \
+                and not tr.drain(timeout=config.WEB_STOP_DRAIN_SEC) and tr.is_alive():
+            self.sink.log("warn", "Translation was still catching up; the last lines were "
+                                  "saved without it.")
         if self._meeting is not None:
             self._meeting.finalize(datetime.now().isoformat())
             meta = dict(self._meeting.meta)  # snapshot before clearing, for the central sync

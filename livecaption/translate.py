@@ -130,6 +130,15 @@ class Translator(threading.Thread):
         target = normalize_target_language(target_lang).prompt_name if target_lang else None
         self._queue.put(("reset", target))
 
+    def drain(self, timeout: float) -> bool:
+        """Block until everything submitted so far has been processed. Returns False on
+        timeout, or right away when the thread is gone (its model failed to load)."""
+        if not self.is_alive():
+            return False
+        done = threading.Event()
+        self._queue.put(("barrier", done))
+        return done.wait(timeout)
+
     def stop(self) -> None:
         self._queue.put(None)
 
@@ -251,6 +260,9 @@ class Translator(threading.Thread):
             item = self._queue.get()
             if item is None:
                 break
+            if item[0] == "barrier":  # everything queued before it is done, see drain
+                item[1].set()
+                continue
             if item[0] == "reset":  # applied in queue order, see reset_context
                 if item[1] is not None:
                     self.target_lang = item[1]

@@ -180,3 +180,9 @@ MT_REPETITION_PENALTY = 1.05
 # plenty for a single subtitle line; just an upper-bound safeguard against the model running away
 MT_MAX_TOKENS = 256
 DEFAULT_TARGET_LANG = "zh-cn"
+
+# ---- Web UI session (webapp.py) ----
+# On Stop, the translator is usually a sentence or two behind the ASR. The meeting is only
+# closed once those last lines are translated (the UI shows "Stopping…" meanwhile), waiting at
+# most this long -- past it the remaining lines are saved untranslated, with a warning.
+WEB_STOP_DRAIN_SEC = 30.0
