@@ -18,6 +18,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import re
 import threading
 from datetime import datetime
 from pathlib import Path
@@ -25,6 +26,9 @@ from pathlib import Path
 from .websink import _segments_out, _zh_segments_out
 
 _SOURCE_LABELS = {"me": "现场", "them": "线上"}
+# the only shape MeetingStore.create mints; anything else in a URL (e.g. "..") is refused
+# before it can name a path outside the store
+_ID_RE = re.compile(r"\d{8}-\d{6}(?:-\d+)?")
 
 
 def _default_title(created_at: datetime) -> str:
@@ -133,6 +137,8 @@ class MeetingStore:
         return m
 
     def _load_raw(self, mid: str) -> dict | None:
+        if not _ID_RE.fullmatch(mid):
+            return None
         path = self._path(mid)
         if not path.exists():
             return None
@@ -190,6 +196,8 @@ class MeetingStore:
         return True
 
     def delete(self, mid: str) -> bool:
+        if not _ID_RE.fullmatch(mid):
+            return False
         d = self.root / mid
         p = self._path(mid)
         if not p.exists():

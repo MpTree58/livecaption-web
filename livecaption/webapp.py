@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import contextlib
 import gc
+import ipaddress
 import json
 import os
 import signal
@@ -579,7 +580,30 @@ class _Handler(BaseHTTPRequestHandler):
         except json.JSONDecodeError:
             return {}
 
+    def _request_allowed(self, *, writes: bool) -> bool:
+        """Only this machine's own page may use the API. Any website the user visits can
+        send requests to 127.0.0.1, so without these checks one could silently POST /start
+        (record the microphone) or rewrite notes, and a DNS-rebinding page (its own domain
+        re-pointed at 127.0.0.1) could read every meeting. The Host must be localhost or an
+        IP literal -- rebinding needs a domain name -- and a browser's state-changing request
+        must come from this same origin (non-browser clients send no Origin header)."""
+        host = (self.headers.get("Host") or "").strip()
+        name = host[1:].split("]", 1)[0] if host.startswith("[") else host.rsplit(":", 1)[0]
+        if name != "localhost":
+            try:
+                ipaddress.ip_address(name)
+            except ValueError:
+                self._send_json({"error": "forbidden host"}, status=403)
+                return False
+        origin = self.headers.get("Origin")
+        if writes and origin is not None and origin != f"http://{host}":
+            self._send_json({"error": "cross-origin request refused"}, status=403)
+            return False
+        return True
+
     def do_GET(self) -> None:  # noqa: N802
+        if not self._request_allowed(writes=False):
+            return
         path = self.path.split("?", 1)[0]
         if path in ("/", "/index.html"):
             self._serve_html()
@@ -604,6 +628,8 @@ class _Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         body = self._body_json(self._read_body())  # always drain the body (keep-alive safety)
+        if not self._request_allowed(writes=True):
+            return
         path = self.path.split("?", 1)[0]
         if path == "/start":
             self._send_json(self._session.start(body.get("source", "both"), body.get("lang")))
@@ -620,6 +646,8 @@ class _Handler(BaseHTTPRequestHandler):
 
     def do_DELETE(self) -> None:  # noqa: N802
         self._read_body()  # drain any body for keep-alive safety
+        if not self._request_allowed(writes=True):
+            return
         path = self.path.split("?", 1)[0]
         if path.startswith("/meetings/"):
             ok = self._session.delete_meeting(path.split("/")[2])
