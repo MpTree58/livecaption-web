@@ -71,4 +71,4 @@ AudioSource(后台)  ──queue──▶  AsrWorker(线程)  ──final 句─
 ## 约定
 
 - **运行时面向用户的文案用英文**（console 输出、CLI `--help`、异常消息、脚本 print）；**代码注释和 docstring 也用英文**（2026-06 起为面向国际开源从中文改为英文；本 `CLAUDE.md` 作为内部开发指导保留中文，README 为中文主版 + `README.en.md` 英文版）。
-- **翻译 prompt 完全遵循 Hy-MT2 官方 README 模版**（`config.py` 的 `TRANSLATE_PROMPT` / `TRANSLATE_PROMPT_WITH_CONTEXT`），不要自创加约束；采样参数也是官方推荐值，勿随意改。带上下文时前文用**空格**拼接（不是换行），因为端点切出的"句子"常是连续语流的片段。对模型输出缺陷的纠正一律放在**输出后处理**（`translate.py` 的 boilerplate 剥离 / 上下文回声重翻 / 短碎片降级为无上下文模版），不动 prompt 本身。
+- **翻译 prompt 完全遵循 Hy-MT2 官方 README 模版**（`config.py` 的 `TRANSLATE_PROMPT` / `TRANSLATE_PROMPT_WITH_CONTEXT`，以及 README 给出的中文版 `*_ZH`），不要自创加约束；**按目标语言选模版**：译成中文用中文版（中文语言名），译成其他语言用英文版——这是实测结论（`scripts/eval_mt.py`：英→中带上下文 WMT20 37.6→40.8、TED 26.1→29.2 BLEU；中→英用中文版反而 29.7→25.6），改模版前先用它重测。采样参数也是官方推荐值，勿随意改（实测贪心解码无差别）。带上下文时前文用**空格**拼接（不是换行），因为端点切出的"句子"常是连续语流的片段。对模型输出缺陷的纠正一律放在**输出后处理**（`translate.py` 的 boilerplate 剥离 / 上下文回声重翻 / 短碎片降级为无上下文模版），不动 prompt 本身。

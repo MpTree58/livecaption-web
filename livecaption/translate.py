@@ -45,6 +45,9 @@ _BOILERPLATE_RE = re.compile(
 )
 # quote pairs the model wraps the translation in after a meta lead-in
 _QUOTE_PAIRS = {"“": "”", '"': '"', "「": "」", "'": "'"}
+# Chinese prompts name the target language in Chinese (Hy-MT2 README: "Chinese names should be
+# used in Chinese prompts"); these are the prompt names languages.py produces for zh targets
+_ZH_TARGET_NAMES = {"Simplified Chinese": "简体中文", "Traditional Chinese": "繁体中文"}
 
 
 def _strip_boilerplate(zh: str) -> str:
@@ -226,14 +229,16 @@ class Translator(threading.Thread):
     def _generate(self, text: str, context: str) -> str:
         from mlx_lm import stream_generate
 
+        # into Chinese, the README's Chinese templates (with the Chinese language name) translate
+        # better than the English ones; into any other language the English ones -- see config
+        zh_name = _ZH_TARGET_NAMES.get(self.target_lang)
         if context:
-            content = config.TRANSLATE_PROMPT_WITH_CONTEXT.format(
-                context=context, target_lang=self.target_lang, text=text
-            )
+            template = (config.TRANSLATE_PROMPT_WITH_CONTEXT_ZH if zh_name
+                        else config.TRANSLATE_PROMPT_WITH_CONTEXT)
         else:
-            content = config.TRANSLATE_PROMPT.format(
-                target_lang=self.target_lang, text=text
-            )
+            template = config.TRANSLATE_PROMPT_ZH if zh_name else config.TRANSLATE_PROMPT
+        content = template.format(context=context, target_lang=zh_name or self.target_lang,
+                                  text=text)
         messages = [{"role": "user", "content": content}]
         # mlx-lm defaults to tokenize=True and returns token ids; matches the official README usage
         prompt = self._tokenizer.apply_chat_template(
