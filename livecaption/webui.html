@@ -106,6 +106,8 @@
   .sp.them.s0 { color: var(--t1); } .sp.them.s1 { color: var(--t2); } .sp.them.s2 { color: var(--t3); } .sp.them.s3 { color: var(--t4); }
   .del { color: var(--del); text-decoration: line-through; }
   .add { color: var(--add); font-weight: 600; }
+  #scroll.nodiff .del { display: none; }
+  #scroll.nodiff .add { color: inherit; font-weight: inherit; }
   #livepartials .en { color: var(--partial); }
   /* provisional translation of the in-progress sentence; the final translation replaces it */
   #livepartials .zh { font-weight: 400; opacity: .8; }
@@ -211,7 +213,10 @@
       if (i) container.appendChild(document.createTextNode("  "));
       const sp = speakerSpan(seg.speaker, side);
       if (sp) container.appendChild(sp);
-      if (seg.diff && diffChk.checked) {
+      // always render the correction spans; the diff checkbox only toggles their styling
+      // (.nodiff), so it also applies to lines already on screen -- same+add spans read as
+      // exactly seg.text once the struck-out ones are hidden
+      if (seg.diff) {
         seg.diff.forEach(([kind, words]) => {
           if (kind === "same") { container.appendChild(document.createTextNode(words)); }
           else {
@@ -551,13 +556,34 @@
     if (level !== "warn") bannerTimer = setTimeout(() => { banner.style.display = "none"; }, 6000);
   }
 
+  // --- per-browser preferences (best effort: storage may be unavailable, e.g. private mode) ---
+  const prefs = {
+    get(k, dflt) {
+      try { const v = localStorage.getItem("livecaption." + k); return v === null ? dflt : JSON.parse(v); }
+      catch (_) { return dflt; }
+    },
+    set(k, v) { try { localStorage.setItem("livecaption." + k, JSON.stringify(v)); } catch (_) { /* ignore */ } },
+  };
+
   // --- controls ---
+  function setSource(src) {
+    st.source = src;
+    sourceBtns.forEach((x) => x.classList.toggle("active", x.dataset.src === src));
+  }
   sourceBtns.forEach((b) => b.addEventListener("click", () => {
     if (st.running) return;
-    st.source = b.dataset.src;
-    sourceBtns.forEach((x) => x.classList.toggle("active", x === b));
+    setSource(b.dataset.src); prefs.set("source", b.dataset.src);
   }));
-  langEl.addEventListener("change", () => { if (!st.running) st.lang = langEl.value; });
+  langEl.addEventListener("change", () => {
+    if (!st.running) { st.lang = langEl.value; prefs.set("lang", langEl.value); }
+  });
+  diffChk.checked = prefs.get("diff", true);
+  scroll.classList.toggle("nodiff", !diffChk.checked);
+  diffChk.addEventListener("change", () => {
+    scroll.classList.toggle("nodiff", !diffChk.checked); prefs.set("diff", diffChk.checked);
+  });
+  autoChk.checked = prefs.get("autoscroll", true);
+  autoChk.addEventListener("change", () => prefs.set("autoscroll", autoChk.checked));
   toggle.addEventListener("click", () => {
     if (!st.running) api.post("/start", { source: st.source, lang: st.lang });
     else api.post("/stop", {});
@@ -572,7 +598,13 @@
       const o = document.createElement("option");
       o.value = l.key; o.textContent = l.label; langEl.appendChild(o);
     });
-    if (state.lang) { st.lang = state.lang; langEl.value = state.lang; }
+    // a running session dictates source/language (its status event follows); idle, the last
+    // choice made in this browser wins over the server's default
+    const lastLang = prefs.get("lang", null);
+    const lang = (!state.running && (state.langs || []).some((l) => l.key === lastLang)) ? lastLang : state.lang;
+    if (lang) { st.lang = lang; langEl.value = lang; }
+    const lastSource = prefs.get("source", st.source);
+    if (!state.running && sourceBtns.some((b) => b.dataset.src === lastSource)) setSource(lastSource);
     if (state.running && state.meeting) { st.liveId = state.meeting; }
     if (st.meetings.length) selectMeeting((st.liveId || st.meetings[0].id));
     connect();
