@@ -310,6 +310,28 @@
   function flushPending() {
     livedoc.querySelectorAll(".zh.pending").forEach((z) => { z.classList.remove("pending"); z.textContent = ""; });
   }
+  // The live view only holds what streamed in since this page connected: a page opened or
+  // reloaded mid-recording started empty, and lines/translations that went out while the
+  // connection was down were missing. Fill both in from the saved record, in saved order;
+  // lines streamed after the fetch (not in it yet) stay after them.
+  function mergeSavedIntoLive(saved) {
+    const savedIds = new Set(saved.map((u) => "u-" + cssId(u.key)));
+    let next = Array.from(livedoc.children).find((c) => !savedIds.has(c.id)) || null;
+    for (let i = saved.length - 1; i >= 0; i--) {
+      const u = saved[i];
+      if (!st.liveSeen.has(u.label)) { st.liveSeen.add(u.label); if (st.liveSeen.size > 1) livedoc.classList.add("multi"); }
+      const el = livedoc.querySelector("#u-" + cssId(u.key));
+      if (el) {
+        const zh = el.querySelector(".zh.pending");
+        if (zh && u.zh) { zh.classList.remove("pending"); renderZh(zh, u.zh, sideOf(u.label)); }
+        next = el;
+      } else {
+        const node = makeUtterance(u);
+        livedoc.insertBefore(node, next);
+        next = node;
+      }
+    }
+  }
   function clearLive() {
     livedoc.textContent = ""; livepartials.textContent = "";
     livedoc.classList.remove("multi"); st.liveSeen = new Set();
@@ -374,6 +396,7 @@
     deleteBtn.style.display = isLive ? "none" : "";
     // render body: live shows the streaming DOM, past renders from saved utterances
     if (isLive) {
+      mergeSavedIntoLive(data.utterances || []);
       livedoc.style.display = ""; livepartials.style.display = ""; pastdoc.style.display = "none";
       empty.style.display = (livedoc.children.length || livepartials.children.length) ? "none" : "";
     } else {
