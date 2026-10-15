@@ -111,6 +111,7 @@
   .badge.them { background: var(--badge-them-bg); color: var(--badge-them-fg); }
   .zh { color: var(--zh); font-weight: 600; margin-top: 2px; }
   .zh.pending { color: var(--muted); font-weight: 400; font-style: italic; }
+  .zh.pending:empty::after { content: "translating…"; font-size: 13px; }
   .sp { font-weight: 700; margin-right: 4px; }
   .sp.me.s0 { color: var(--m1); } .sp.me.s1 { color: var(--m2); } .sp.me.s2 { color: var(--m3); } .sp.me.s3 { color: var(--m4); }
   .sp.them.s0 { color: var(--t1); } .sp.them.s1 { color: var(--t2); } .sp.them.s2 { color: var(--t3); } .sp.them.s3 { color: var(--t4); }
@@ -122,6 +123,9 @@
   /* provisional translation of the in-progress sentence; the final translation replaces it */
   #livepartials .zh { font-weight: 400; opacity: .8; }
   .empty { color: var(--muted); text-align: center; margin-top: 16vh; font-size: 14px; }
+  /* shown while reading back through a live transcript; sticks to the bottom of the view */
+  #jump { position: sticky; bottom: 4px; display: block; margin: 8px auto 0; padding: 6px 14px; border: 0; border-radius: 16px; background: var(--accent); color: #fff; font: inherit; font-size: 13px; font-weight: 600; cursor: pointer; box-shadow: 0 2px 8px rgba(0,0,0,.25); }
+  #jump[hidden] { display: none; }
 </style>
 </head>
 <body>
@@ -166,6 +170,7 @@
         <div id="livepartials"></div>
         <div id="pastdoc" class="doc" style="display:none"></div>
         <div class="empty" id="empty">Pick a source and click Start — or select a past meeting.</div>
+        <button id="jump" hidden>↓ Back to live</button>
       </div>
       <div id="notespanel">
         <div class="nhead"><span>Notes</span><span class="saved" id="notesaved"></span></div>
@@ -181,7 +186,7 @@
   const $ = (s) => document.querySelector(s);
   const scroll = $("#scroll"), livedoc = $("#livedoc"), livepartials = $("#livepartials");
   const pastdoc = $("#pastdoc"), empty = $("#empty"), banner = $("#banner"), pane = $("#pane");
-  const bannerText = $("#bannertext");
+  const bannerText = $("#bannertext"), jumpBtn = $("#jump");
   const progressEl = $("#progress"), progressText = $("#progresstext"), progressFill = $("#progressfill");
   const toggle = $("#toggle"), statusEl = $("#status"), statusText = $("#statustext");
   const sourceBtns = Array.from(document.querySelectorAll("#source button"));
@@ -191,7 +196,7 @@
         deleteBtn = $("#delete"), notesEl = $("#notes"), notesaved = $("#notesaved");
 
   const st = { running: false, phase: "idle", liveId: null, liveMeta: null, selected: null,
-               source: "both", lang: "en", meetings: [], liveSeen: new Set() };
+               source: "both", lang: "en", translate: true, meetings: [], liveSeen: new Set() };
   let bannerTimer = null, notesTimer = null;
   const EMPTY_IDLE = "Pick a source and click Start — or select a past meeting.";
   const EMPTY_LIVE = "Listening — captions appear here as people speak.";
@@ -260,8 +265,9 @@
       container.appendChild(document.createTextNode(seg.zh));
     });
   }
-  // build one finalized utterance block (used by live finals and saved meetings)
-  function makeUtterance(u) {
+  // build one finalized utterance block (used by live finals and saved meetings); only a live
+  // line can still be waiting for its translation -- a saved one without it never gets one
+  function makeUtterance(u, live) {
     const side = sideOf(u.label);
     const el = document.createElement("div");
     el.className = "u"; el.id = "u-" + cssId(u.key);
@@ -272,13 +278,18 @@
     en.appendChild(body);
     renderEn(body, u.en, side);
     const zh = document.createElement("div"); zh.className = "zh";
-    if (u.zh) { renderZh(zh, u.zh, side); } else { zh.classList.add("pending"); }
+    if (u.zh) { renderZh(zh, u.zh, side); } else if (live && st.translate) { zh.classList.add("pending"); }
     el.appendChild(en); el.appendChild(zh);
     return el;
   }
   const nearBottom = () => scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 60;
-  function maybeScroll(was) { if (autoChk.checked && was) scroll.scrollTop = scroll.scrollHeight; }
   const viewingLive = () => st.selected && st.selected === st.liveId;
+  // reading back through a live transcript: new lines don't yank the view down (auto-scroll
+  // only follows while you're at the bottom), so offer the way back instead
+  function updateJump() { jumpBtn.hidden = !(viewingLive() && !nearBottom()); }
+  function maybeScroll(was) { if (autoChk.checked && was) scroll.scrollTop = scroll.scrollHeight; updateJump(); }
+  scroll.addEventListener("scroll", updateJump, { passive: true });
+  jumpBtn.addEventListener("click", () => { scroll.scrollTop = scroll.scrollHeight; updateJump(); });
 
   // --- live SSE rendering (targets livedoc/livepartials) ---
   function upsertFinal(ev) {
@@ -287,7 +298,7 @@
     const was = nearBottom();
     let u = document.getElementById("u-" + cssId(ev.key));
     const rec = { key: ev.key, label: ev.label, at: ev.at, en: ev.segments, zh: null };
-    if (!u) { livedoc.appendChild(makeUtterance(rec)); updateLiveCount(); }
+    if (!u) { livedoc.appendChild(makeUtterance(rec, true)); updateLiveCount(); }
     else { renderEn(u.querySelector(".enbody"), ev.segments, sideOf(ev.label)); }
     if (viewingLive()) { empty.style.display = "none"; maybeScroll(was); }
   }
@@ -359,7 +370,7 @@
         if (zh && u.zh) { zh.classList.remove("pending"); renderZh(zh, u.zh, sideOf(u.label)); }
         next = el;
       } else {
-        const node = makeUtterance(u);
+        const node = makeUtterance(u, true);
         livedoc.insertBefore(node, next);
         next = node;
       }
@@ -440,6 +451,10 @@
     exportA.href = "/meetings/" + id + "/export.md";
     const isLive = (id === st.liveId);
     deleteBtn.style.display = isLive ? "none" : "";
+    // Re-rendering the meeting already on screen (e.g. live -> saved on Stop) keeps the reader's
+    // place, or the bottom if they were following it; another meeting opens at its start, the
+    // live one at its newest line. (The page used to land at whatever offset it had before.)
+    const keep = same ? { top: scroll.scrollTop, bottom: nearBottom() } : null;
     // render body: live shows the streaming DOM, past renders from saved utterances
     if (isLive) {
       st.liveMeta = meta;
@@ -459,6 +474,9 @@
         e.textContent = "No transcript in this meeting."; pastdoc.appendChild(e);
       }
     }
+    if (keep) scroll.scrollTop = keep.bottom ? scroll.scrollHeight : keep.top;
+    else scroll.scrollTop = isLive ? scroll.scrollHeight : 0;
+    updateJump();
     refreshList();
   }
 
@@ -657,6 +675,7 @@
     const lastLang = prefs.get("lang", null);
     const lang = (!state.running && (state.langs || []).some((l) => l.key === lastLang)) ? lastLang : state.lang;
     if (lang) { st.lang = lang; langEl.value = lang; }
+    st.translate = state.translate !== false;
     const lastSource = prefs.get("source", st.source);
     if (!state.running && sourceBtns.some((b) => b.dataset.src === lastSource)) setSource(lastSource);
     if (state.running && state.meeting) { st.liveId = state.meeting; }
