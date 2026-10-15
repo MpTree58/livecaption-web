@@ -8,7 +8,9 @@ footprint. A model left resident after a switch shows up as a step that never co
 down; returning to the first preset must land back near the first measurement.
 
 Also checks that each run's translation comes out in that preset's target language (the
-translator is shared across presets and switches direction in place).
+translator is shared across presets and switches direction in place), and that an idle
+session frees every model (idle unload shortened to IDLE_UNLOAD_MIN here) and reloads them
+on the next Start.
     uv run --extra qwen python scripts/smoke_model_swap.py
 """
 
@@ -36,6 +38,7 @@ CLIPS = {
 }
 SEQUENCE = ["en", "mixed", "zh", "en"]
 TIMEOUT = 600  # first loads can include a cold disk read of several GB
+IDLE_UNLOAD_MIN = 0.15  # 9 s -- far longer than the gap between the runs below
 
 
 class _RUsageV2(ctypes.Structure):
@@ -113,6 +116,7 @@ with tempfile.TemporaryDirectory() as td:
         mt_model_id=config.DEFAULT_MT_MODEL,
         context=config.MT_CONTEXT_SENTENCES,
         audiotee_path=None,
+        idle_unload_min=IDLE_UNLOAD_MIN,
     )
 
     rows = []
@@ -139,8 +143,6 @@ with tempfile.TemporaryDirectory() as td:
         else:
             assert has_cjk(zh), f"{lang}: expected a Chinese translation, got {zh!r}"
 
-    session.shutdown()
-
     first_en, last_en = rows[0], rows[-1]
     peak = max(r[2] for r in rows)
     print(f"en first {first_en[2]:.2f} GB, en again {last_en[2]:.2f} GB, peak {peak:.2f} GB")
@@ -150,5 +152,30 @@ with tempfile.TemporaryDirectory() as td:
         print(f"model swap smoke test FAILED: {leaked:.2f} GB still resident after "
               "switching back to the first preset")
         sys.exit(1)
+
+    # idle: every model is freed once the (shortened) idle timeout passes -- MLX's buffer
+    # cache emptied too, and the pages actually handed back to the OS (which takes a moment)
+    deadline = time.monotonic() + IDLE_UNLOAD_MIN * 60 + 20
+    while (mx.get_active_memory() + mx.get_cache_memory()) / 1e9 > 0.3 \
+            and time.monotonic() < deadline:
+        time.sleep(0.5)
+    time.sleep(3)
+    idle_gb, idle_fp = mx.get_active_memory() / 1e9, footprint_gb()
+    print(f"idle after {IDLE_UNLOAD_MIN * 60:.0f}s: MLX active {idle_gb:.2f} GB  "
+          f"cache {mx.get_cache_memory() / 1e9:.2f} GB  footprint {idle_fp:.2f} GB")
+    if idle_gb > 0.3 or idle_fp > 1.0:
+        print("model swap smoke test FAILED: models still held after the idle timeout")
+        sys.exit(1)
+    # ... and the next Start reloads them (translator included)
+    current["lang"] = "en"
+    t0 = time.monotonic()
+    assert session.start("mic", "en")["ok"], "start after idle unload refused"
+    tr = wait_for(events, lambda e: e.get("type") == "translation", "translation after reload")
+    print(f"restart after unload: first translation in {time.monotonic() - t0:.1f}s | "
+          f"{' '.join(s['zh'] for s in tr['segments'])}")
+    session.stop()
+    wait_for(events, lambda e: e.get("type") == "status" and e["state"] == "idle", "idle")
+
+    session.shutdown()
 
 print("model swap smoke test PASSED")

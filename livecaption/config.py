@@ -186,3 +186,7 @@ DEFAULT_TARGET_LANG = "zh-cn"
 # closed once those last lines are translated (the UI shows "Stopping…" meanwhile), waiting at
 # most this long -- past it the remaining lines are saved untranslated, with a warning.
 WEB_STOP_DRAIN_SEC = 30.0
+# Minutes after a Stop before the idle server frees its models (webapp --idle-unload; 0 = keep
+# them loaded). The menu-bar app keeps the server running from login, and a warm preset holds
+# 3.5-4.7 GB of unified memory; reloading from the disk cache on the next Start takes ~2-4 s.
+WEB_IDLE_UNLOAD_MIN = 5.0

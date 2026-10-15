@@ -32,6 +32,8 @@ curl -LsSf https://raw.githubusercontent.com/MpTree58/livecaption-web/main/scrip
 
 它会自动装好一切并创建 `/Applications/livecaption.app`（默认随登录自启，`| bash -s -- --no-login` 可关；`--uninstall` 卸载）。之后点菜单栏 🎙 → "Open livecaption" 就能录制和浏览会议。
 
+常驻不等于一直占内存：网页端只保留当前语言预设的模型（英文约 3.5GB、中文/中英混合约 4.7GB 统一内存，切换语言会先释放上一套），停止录制 5 分钟后自动全部释放，下次点 Start 再从磁盘缓存加载（几秒）。时长用 `livecaption-web --idle-unload 分钟数` 调整，`0` 为不释放。
+
 命令行手动安装：
 
 ```bash

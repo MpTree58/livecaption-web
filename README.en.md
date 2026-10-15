@@ -32,6 +32,8 @@ curl -LsSf https://raw.githubusercontent.com/MpTree58/livecaption-web/main/scrip
 
 It sets everything up and creates `/Applications/livecaption.app` (auto-starts at login by default; `| bash -s -- --no-login` to skip, `--uninstall` to remove). Then click the menu-bar 🎙 → "Open livecaption" to record and browse meetings.
 
+Always running doesn't mean always holding memory: the web UI keeps only the current language preset's models loaded (about 3.5 GB of unified memory for English, 4.7 GB for Chinese / mixed; switching language frees the previous set first), frees all of them 5 minutes after you stop recording, and reloads them from the disk cache on the next Start (a few seconds). Change the delay with `livecaption-web --idle-unload MINUTES`; `0` keeps them loaded.
+
 Manual command-line install:
 
 ```bash

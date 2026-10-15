@@ -90,6 +90,7 @@ class Session:
         audiotee_path: str | None,
         sync_url: str = "",
         sync_token: str = "",
+        idle_unload_min: float = config.WEB_IDLE_UNLOAD_MIN,
     ) -> None:
         self.sink = sink
         self.store = store
@@ -109,6 +110,10 @@ class Session:
         self._recognizer: object | None = None
         self._recognizer_key: str | None = None
         self._translator: Translator | None = None
+        # ...but only for a while: an idle server (the menu-bar app keeps it running from
+        # login) frees them after idle_unload_min minutes (0 = never)
+        self._idle_unload_min = idle_unload_min
+        self._idle_timer: threading.Timer | None = None
 
         # serialize start/stop; _running is the user-visible state
         self._op_lock = threading.Lock()
@@ -136,6 +141,7 @@ class Session:
                 return {"ok": False, "error": f"bad lang {lang!r}"}
             self._running = True
             self._lang = lang
+            self._cancel_idle_unload()
         self.sink.status("starting", source_kind, lang=lang)
         threading.Thread(
             target=self._start_impl, args=(source_kind, lang), daemon=True, name="session-start"
@@ -232,6 +238,44 @@ class Session:
         self._recognizer = None
         self._recognizer_key = None
         _free_mlx_memory()
+
+    # --- idle unload: don't hold several GB of unified memory between meetings ---
+    def _arm_idle_unload(self) -> None:
+        if self._idle_unload_min <= 0:
+            return
+        with self._op_lock:
+            self._cancel_idle_unload()
+            timer = threading.Timer(self._idle_unload_min * 60, self._unload_idle_models)
+            timer.daemon = True  # never hold up process exit
+            timer.start()
+            self._idle_timer = timer
+
+    def _cancel_idle_unload(self) -> None:
+        """Caller holds _op_lock."""
+        if self._idle_timer is not None:
+            self._idle_timer.cancel()
+            self._idle_timer = None
+
+    def _unload_idle_models(self) -> None:
+        """Free every model after the configured idle time; the next Start reloads them from
+        the disk cache in seconds. Runs under _op_lock, so a concurrent Start either already
+        claimed the session (then nothing is unloaded) or waits for the unload to finish."""
+        with self._op_lock:
+            self._idle_timer = None
+            if self._running or (self._recognizer is None and self._translator is None):
+                return
+            if self._translator is not None:
+                # idle means drained: the thread is just waiting on its queue
+                self._translator.stop()
+                self._translator.join(timeout=10)
+                self._translator = None
+            self._recognizer = None
+            self._recognizer_key = None
+            _free_mlx_memory()
+        console.print(
+            f"[dim]Models unloaded after {self._idle_unload_min:g} idle minutes; the next "
+            "Start reloads them.[/dim]"
+        )
 
     def _get_translator(self, target_prompt: str) -> Translator:
         tr = self._translator
@@ -339,6 +383,7 @@ class Session:
             self._meeting = None
             with self._op_lock:
                 self._running = False
+            self._arm_idle_unload()  # whatever did load before the failure
 
     def _stop_impl(self) -> None:
         for src in self._sources:
@@ -363,6 +408,7 @@ class Session:
         self._workers = []
         # idle: the just-ended meeting is now saved; the browser refetches the list
         self.sink.status("idle", None)
+        self._arm_idle_unload()
 
     def _sync_meeting(self, meta: dict) -> None:
         """Push a finished meeting to the central server (best-effort, in the background).
@@ -425,6 +471,8 @@ class Session:
             with self._op_lock:
                 self._running = False
             self._stop_impl()
+        with self._op_lock:
+            self._cancel_idle_unload()
         if self._translator is not None:
             self._translator.stop()
             self._translator.join(timeout=10)
@@ -718,6 +766,11 @@ def main(
     context: int = typer.Option(
         config.MT_CONTEXT_SENTENCES, help="Prior sentences as translation context (0=off)"
     ),
+    idle_unload: float = typer.Option(
+        config.WEB_IDLE_UNLOAD_MIN, "--idle-unload", metavar="MINUTES",
+        help="Free the models after this many idle minutes; the next Start reloads them in "
+        "seconds (0 = keep them loaded)",
+    ),
     audiotee: str | None = typer.Option(None, help="Path to the audiotee binary"),
     sync_url: str | None = typer.Option(
         None, "--sync-url",
@@ -751,6 +804,7 @@ def main(
         audiotee_path=audiotee,
         sync_url=sync_url,
         sync_token=sync_token,
+        idle_unload_min=idle_unload,
     )
 
     # surface the deep-in-the-stack system-audio silence warning to the browser banner
