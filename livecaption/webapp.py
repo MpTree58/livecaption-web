@@ -20,6 +20,7 @@ import contextlib
 import gc
 import json
 import os
+import signal
 import sys
 import threading
 import webbrowser
@@ -886,6 +887,15 @@ def main(
         )
     if open_browser:
         threading.Timer(0.5, lambda: webbrowser.open(url)).start()
+
+    def _on_sigterm(*_: object) -> None:
+        # The menu-bar app's Quit / Restart (and logout) end the engine with SIGTERM, whose
+        # default action kills the process on the spot: the meeting being recorded never got
+        # closed and its in-flight sentence and pending translations were lost. Take the
+        # same graceful path as Ctrl-C instead.
+        raise KeyboardInterrupt
+
+    signal.signal(signal.SIGTERM, _on_sigterm)
 
     try:
         server.serve_forever()
