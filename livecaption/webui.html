@@ -100,6 +100,7 @@
   #viewmeta { display: flex; align-items: center; gap: 12px; margin-top: 6px; font-size: 12.5px; color: var(--muted); padding-left: 6px; }
   #viewmeta a, #viewmeta button { color: var(--accent); font-size: 12.5px; text-decoration: none; background: none; border: 0; cursor: pointer; font-family: inherit; padding: 0; }
   #viewmeta button.danger { color: var(--m3); }
+  #viewmeta button.danger.armed { color: #fff; background: var(--m3); font-weight: 700; padding: 1px 8px; border-radius: 5px; text-decoration: none; }
   #viewmeta a:hover, #viewmeta button:hover { text-decoration: underline; }
 
   #content { flex: 1; display: flex; min-height: 0; }
@@ -479,6 +480,7 @@
   async function selectMeeting(id) {
     const seq = ++selectSeq;
     const same = st.selected === id;
+    if (!same) disarmDelete();  // a pending "click again to delete" was for the meeting being left
     await saveNotesNow();  // typed notes belong to the meeting being left (or reloaded)
     st.selected = id;
     markSelected(id);
@@ -563,18 +565,33 @@
   titleEl.addEventListener("blur", saveTitle);
   titleEl.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); titleEl.blur(); } });
 
-  // --- delete ---
+  // --- delete: two clicks on the button itself instead of a blocking confirm() dialog ---
+  let deleteArmed = null;  // {id, timer} while "Click again to delete" is showing
+  function disarmDelete() {
+    if (!deleteArmed) return;
+    clearTimeout(deleteArmed.timer); deleteArmed = null;
+    deleteBtn.textContent = "Delete"; deleteBtn.classList.remove("armed");
+  }
   deleteBtn.addEventListener("click", async () => {
-    if (!st.selected || st.selected === st.liveId) return;
-    if (!confirm("Delete this meeting?")) return;
-    const r = await api.del("/meetings/" + st.selected);
-    if (r.ok) {
+    const id = st.selected;
+    if (!id || id === st.liveId) return;
+    if (!deleteArmed || deleteArmed.id !== id) {
+      disarmDelete();
+      deleteArmed = { id, timer: setTimeout(disarmDelete, 4000) };
+      deleteBtn.textContent = "Click again to delete"; deleteBtn.classList.add("armed");
+      return;
+    }
+    disarmDelete();
+    const r = await api.del("/meetings/" + id);
+    if (!r.ok) { showBanner("warn", "Couldn't delete: " + (r.error || "it is being recorded")); return; }
+    if (st.selected === id) {
       st.selected = null; pastdoc.textContent = ""; titleEl.value = ""; notesEl.value = "";
       metaText.textContent = ""; pane.classList.add("nosel");
       empty.textContent = EMPTY_IDLE; empty.style.display = "";
-      await refreshList();
-      if (st.meetings.length) selectMeeting(st.meetings[0].id);
     }
+    showBanner("info", "Meeting deleted.");
+    await refreshList();
+    if (!st.selected && st.meetings.length) selectMeeting(st.meetings[0].id);
   });
 
   // --- search ---
