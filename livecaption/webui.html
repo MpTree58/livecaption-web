@@ -15,6 +15,7 @@
     --t1: #5b9dff; --t2: #b98cff; --t3: #7d8cff; --t4: #98a6c8;
     --badge-me-bg: #3a2a12; --badge-me-fg: #ffbf6b;
     --badge-them-bg: #16294a; --badge-them-fg: #7fb0ff;
+    --hit: #6b5413; --hitfg: #ffeab0;
   }
   @media (prefers-color-scheme: light) {
     :root {
@@ -27,6 +28,7 @@
       --t1: #2f6fe0; --t2: #7a3fd0; --t3: #4351c8; --t4: #56627a;
       --badge-me-bg: #fdeccf; --badge-me-fg: #8a5a00;
       --badge-them-bg: #dfe9ff; --badge-them-fg: #2551a0;
+      --hit: #ffe58a; --hitfg: #1c2129;
     }
   }
   * { box-sizing: border-box; }
@@ -77,9 +79,13 @@
   .mi { padding: 8px 10px; border-radius: 8px; cursor: pointer; margin-bottom: 2px; }
   .mi:hover { background: var(--border); }
   .mi.sel { background: var(--sel); }
+  .mi:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
   .mi .t { font-size: 13.5px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .mi .m { font-size: 11.5px; color: var(--muted); display: flex; align-items: center; gap: 6px; margin-top: 1px; }
-  .mi .rec { color: var(--m3); font-weight: 700; }
+  /* items wrap between fields, never inside one (a squeezed "● REC" row broke every field in two) */
+  .mi .m { font-size: 11.5px; color: var(--muted); display: flex; flex-wrap: wrap; align-items: center; column-gap: 6px; margin-top: 1px; }
+  .mi .m span { white-space: nowrap; }
+  .mi .rec { color: #fff; background: var(--m3); font-size: 10px; font-weight: 700; letter-spacing: .4px; padding: 0 5px; border-radius: 4px; }
+  mark.hit { background: var(--hit); color: var(--hitfg); border-radius: 2px; }
   .mi .snip { font-size: 11.5px; color: var(--muted); margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-style: italic; }
   .listempty { color: var(--muted); font-size: 13px; padding: 12px; text-align: center; }
 
@@ -381,12 +387,46 @@
     livedoc.classList.remove("multi"); st.liveSeen = new Set();
   }
 
+  // Mark every case-insensitive occurrence of q in root's transcript text (not timestamps or
+  // labels) and return the first mark; q = "" just clears earlier marks. A match split across
+  // a correction span isn't marked -- the search result still lists the meeting.
+  function highlight(root, q) {
+    root.querySelectorAll("mark.hit").forEach((m) => m.replaceWith(m.textContent));
+    root.normalize();
+    if (!q) return null;
+    const needle = q.toLowerCase();
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    const nodes = [];
+    while (walker.nextNode()) nodes.push(walker.currentNode);
+    let first = null;
+    nodes.forEach((n) => {
+      const text = n.nodeValue, low = text.toLowerCase();
+      let i = low.indexOf(needle);
+      if (i < 0 || n.parentElement.closest(".ts, .sp, .badge")) return;
+      const frag = document.createDocumentFragment();
+      let pos = 0;
+      while (i >= 0) {
+        frag.append(text.slice(pos, i));
+        const m = document.createElement("mark"); m.className = "hit";
+        m.textContent = text.slice(i, i + needle.length); frag.append(m);
+        first = first || m;
+        pos = i + needle.length; i = low.indexOf(needle, pos);
+      }
+      frag.append(text.slice(pos));
+      n.replaceWith(frag);
+    });
+    return first;
+  }
+
   // --- meeting list / selection ---
   function fmtDate(iso) {
     if (!iso) return "";
     return iso.replace("T", " ").slice(5, 16); // MM-DD HH:MM
   }
   function renderList(items, isSearch) {
+    // the list is rebuilt on every refresh: hand keyboard focus back to the same entry after
+    const a = document.activeElement;
+    const focusedId = a && a.classList && a.classList.contains("mi") ? a.dataset.id : null;
     listEl.textContent = "";
     if (!items.length) {
       const e = document.createElement("div"); e.className = "listempty";
@@ -402,6 +442,7 @@
       if (m.id === st.liveId) {
         const r = document.createElement("span"); r.className = "rec"; r.textContent = "● REC"; meta.appendChild(r);
       }
+      el.tabIndex = 0; el.setAttribute("role", "button");  // reachable and openable by keyboard
       const d = document.createElement("span"); d.textContent = fmtDate(m.created_at); meta.appendChild(d);
       const c = document.createElement("span"); c.className = "n"; meta.appendChild(c);
       c.textContent = "· " + (m.id === st.liveId ? Math.max(m.utterances || 0, livedoc.children.length) : (m.utterances || 0));
@@ -410,7 +451,13 @@
       el.appendChild(t); el.appendChild(meta);
       if (m.snippet) { const sn = document.createElement("div"); sn.className = "snip"; sn.textContent = m.snippet; el.appendChild(sn); }
       el.addEventListener("click", () => selectMeeting(m.id));
+      el.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" || e.key === " ") { e.preventDefault(); selectMeeting(m.id); }
+        else if (e.key === "ArrowDown" && el.nextElementSibling) { e.preventDefault(); el.nextElementSibling.focus(); }
+        else if (e.key === "ArrowUp" && el.previousElementSibling) { e.preventDefault(); el.previousElementSibling.focus(); }
+      });
       listEl.appendChild(el);
+      if (m.id === focusedId) el.focus();
     });
   }
   async function refreshList() {
@@ -476,6 +523,9 @@
     }
     if (keep) scroll.scrollTop = keep.bottom ? scroll.scrollHeight : keep.top;
     else scroll.scrollTop = isLive ? scroll.scrollHeight : 0;
+    // opened from a search: show where the words are, not just which meeting has them
+    const hit = isLive ? null : highlight(pastdoc, searchEl.value.trim());
+    if (hit && !keep) hit.scrollIntoView({ block: "center" });
     updateJump();
     refreshList();
   }
@@ -533,11 +583,16 @@
     if (searchTimer) clearTimeout(searchTimer);
     const q = searchEl.value.trim();
     searchTimer = setTimeout(async () => {
+      highlight(pastdoc, q);  // keep the open meeting's marks in step with the box
       if (!q) { renderList(st.meetings, false); return; }
       const r = await api.get("/search?q=" + encodeURIComponent(q));
       renderList(r.results || [], true);
     }, 250);
   });
+  function clearSearch() {
+    if (!searchEl.value) return;
+    searchEl.value = ""; highlight(pastdoc, "");
+  }
 
   // --- SSE ---
   function connect() {
@@ -600,10 +655,17 @@
     }
     if (ev.lang) { st.lang = ev.lang; langEl.value = ev.lang; }
     if (ev.state === "listening" && ev.meeting) {
-      if (ev.meeting !== st.liveId) clearLive();       // new recording started
+      const started = ev.meeting !== st.liveId;
+      if (started) {                                    // new recording started:
+        clearLive();
+        clearSearch();                                  // filtered results would hide its ● REC entry
+      }
       st.liveId = ev.meeting;
       await refreshList();
-      selectMeeting(ev.meeting);                        // jump to the live meeting
+      // jump to a recording that just started; the replay of the same status (page load,
+      // reconnect) only re-syncs the live view if it's the one being read -- it used to yank
+      // the reader back from whatever meeting they had opened meanwhile
+      if (started || st.selected === ev.meeting) selectMeeting(ev.meeting);
     } else if (ev.state === "idle") {
       const ended = st.liveId; st.liveId = null;
       await refreshList();
