@@ -5,15 +5,18 @@ process exactly as in the CLI -- the browser is a pure display+control surface r
 over a local HTTP server. Server-Sent Events stream captions to the page; small POST
 endpoints start/stop the pipeline and pick the source (mic / system / both).
 
-The heavy objects (Recognizer weights, Translator thread) are built once on the first
-Start and kept warm across Start/Stop, so repeated meeting sessions start instantly.
-Only the audio sources, ASR workers, and per-session transcript file are torn down on
-Stop. This mirrors cli.py's live-mode wiring; the one swap is WebSink in place of the
-terminal Renderer (same partial/final/translation/preview/flush_pending contract).
+The heavy objects (Recognizer weights, Translator thread) are built on the first Start and
+kept warm across Start/Stop, so repeated meeting sessions start instantly. Only the
+current language preset's models stay loaded: switching language frees the previous
+preset's ASR bundle, and one translator serves every preset. Only the audio sources, ASR
+workers, and per-session transcript file are torn down on Stop. This mirrors cli.py's
+live-mode wiring; the one swap is WebSink in place of the terminal Renderer (same
+partial/final/translation/preview/flush_pending contract).
 """
 
 from __future__ import annotations
 
+import gc
 import json
 import os
 import sys
@@ -24,6 +27,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from queue import Empty
 
+import mlx.core as mx
 import typer
 from huggingface_hub import HfApi, snapshot_download
 from huggingface_hub import constants as hf_constants
@@ -64,10 +68,13 @@ LANG_PRESETS = {
 
 
 class Session:
-    """Owns the live pipeline. Each language preset's ASR recognizer and translator are built
-    lazily on first use and kept warm in per-config caches, so switching language (or just
-    stopping/starting) reuses already-loaded models. Each Start spins up fresh audio sources +
-    ASR workers wired to the shared WebSink and the selected language's translator."""
+    """Owns the live pipeline. The ASR recognizer and the translator are built lazily on first
+    use and kept warm, so stopping/starting reuses already-loaded models. Only the current
+    language preset's recognizer is kept: each ASR bundle is 1.5-3 GB of unified memory, so
+    switching language frees the previous one (reloading from the disk cache takes seconds).
+    One translator serves every preset -- the translation direction is only a prompt
+    parameter, re-set per run. Each Start spins up fresh audio sources + ASR workers wired to
+    the shared WebSink and the translator."""
 
     def __init__(
         self,
@@ -97,9 +104,11 @@ class Session:
         self._sync_url = sync_url.rstrip("/")
         self._sync_token = sync_token
 
-        # warm caches, reused across start/stop and language switches
-        self._recognizers: dict[str, object] = {}  # recognizer-config key -> recognizer
-        self._translators: dict[str, Translator] = {}  # target prompt name -> translator
+        # warm models, reused across start/stop: the current preset's recognizer (with the
+        # config key it was built for) and the one translator shared by every preset
+        self._recognizer: object | None = None
+        self._recognizer_key: str | None = None
+        self._translator: Translator | None = None
 
         # serialize start/stop; _running is the user-visible state
         self._op_lock = threading.Lock()
@@ -164,7 +173,7 @@ class Session:
             m.add_translation(_key(label, started_at), zh_segments)
         self.sink.translation(label, zh_segments, started_at)
 
-    # --- pipeline construction (cached per config so switching language stays warm) ---
+    # --- pipeline construction (models stay warm for the current language preset) ---
     def _stage(self, message: str) -> None:
         """A model-preparation stage notice, shown on the persistent progress line (not the
         auto-hiding banner — during a long first start that line is the user's only feedback,
@@ -193,29 +202,43 @@ class Session:
             preset["backend"], preset["asr_model_id"], preset["asr_lang"],
             str(self._diarize), str(preset["word_diarize"]),
         ])
-        rec = self._recognizers.get(key)
-        if rec is None:
-            self._stage(f"Loading ASR model for {preset['label']} …")
-            if preset["backend"] == "qwen3":
-                from .asr_qwen import build_qwen_recognizer
+        if self._recognizer is not None and self._recognizer_key == key:
+            return self._recognizer
+        # a different preset: free the previous bundle BEFORE loading the next one, so the
+        # two never sit in memory together
+        self._release_recognizer()
+        self._stage(f"Loading ASR model for {preset['label']} …")
+        if preset["backend"] == "qwen3":
+            from .asr_qwen import build_qwen_recognizer
 
-                rec = build_qwen_recognizer(
-                    preset["asr_model_id"], preset["asr_lang"], self._diarize,
-                    self._diarize and preset["word_diarize"],
-                    log=self._stage,
-                )
-            else:
-                rec = build_recognizer(
-                    preset["asr_model_id"], preset["asr_lang"], self._diarize,
-                    log=self._stage,
-                )
-            self._recognizers[key] = rec
+            rec = build_qwen_recognizer(
+                preset["asr_model_id"], preset["asr_lang"], self._diarize,
+                self._diarize and preset["word_diarize"],
+                log=self._stage,
+            )
+        else:
+            rec = build_recognizer(
+                preset["asr_model_id"], preset["asr_lang"], self._diarize,
+                log=self._stage,
+            )
+        self._recognizer, self._recognizer_key = rec, key
         return rec
 
+    def _release_recognizer(self) -> None:
+        """Drop the warm recognizer and hand its memory back (no-op when none is loaded).
+        Only called while no run is active, so no ASR worker still references it."""
+        if self._recognizer is None:
+            return
+        self._recognizer = None
+        self._recognizer_key = None
+        _free_mlx_memory()
+
     def _get_translator(self, target_prompt: str) -> Translator:
-        tr = self._translators.get(target_prompt)
-        if tr is None:
-            self.sink.log("info", f"Loading translation model ({target_prompt}) …")
+        tr = self._translator
+        # (re)build on first use, or when the previous one's model failed to load (its
+        # thread has exited) -- a fresh Start retries instead of staying silently disabled
+        if tr is None or not tr.is_alive():
+            self.sink.log("info", "Loading translation model …")
             tr = Translator(
                 self._mt_model_id,
                 target_prompt,
@@ -226,7 +249,7 @@ class Session:
                 context_size=self._context,
             )
             tr.start()
-            self._translators[target_prompt] = tr
+            self._translator = tr
         return tr
 
     def _build_sources(self, source_kind: str) -> list[AudioSource]:
@@ -245,8 +268,9 @@ class Session:
             recognizer = self._get_recognizer(preset)
             translator = self._get_translator(preset["target_prompt"]) if self._translate else None
             if translator is not None:
-                # fresh meeting: don't inherit the previous session's rolling context
-                translator.reset_context()
+                # fresh meeting: don't inherit the previous session's rolling context, and
+                # translate in this preset's direction
+                translator.reset_context(preset["target_prompt"])
             self._preview_words.clear()
 
             sources = self._build_sources(source_kind)
@@ -389,14 +413,14 @@ class Session:
         return self.store.delete(mid)
 
     def shutdown(self) -> None:
-        """Server exit: stop the run (if any) and tear down every warm translator thread."""
+        """Server exit: stop the run (if any) and tear down the warm translator thread."""
         if self._running:
             with self._op_lock:
                 self._running = False
             self._stop_impl()
-        for tr in self._translators.values():
-            tr.stop()
-            tr.join(timeout=10)
+        if self._translator is not None:
+            self._translator.stop()
+            self._translator.join(timeout=10)
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -562,6 +586,14 @@ class _StderrTee:
 
     def __getattr__(self, name):  # noqa: ANN001 -- delegate isatty/encoding/etc.
         return getattr(self._real, name)
+
+
+def _free_mlx_memory() -> None:
+    """Hand the memory of just-dropped models back to the OS: collect the dropped objects
+    (module trees and the closures around them can form reference cycles), then empty
+    MLX's buffer cache, which otherwise keeps freed Metal buffers for reuse."""
+    gc.collect()
+    mx.clear_cache()
 
 
 def _dir_bytes(root: Path) -> int:

@@ -119,13 +119,16 @@ class Translator(threading.Thread):
             self._preview_seq[label] = seq
         self._queue.put(("preview", label, segments, started_at, seq))
 
-    def reset_context(self) -> None:
-        """Clear the rolling translation context and echo-detection state. Used between web
-        sessions so a new meeting doesn't inherit the previous one's background sentences
-        (the translator thread is kept warm and reused across start/stop)."""
-        if self._history is not None:
-            self._history.clear()
-        self._last_zh = ""
+    def reset_context(self, target_lang: str | None = None) -> None:
+        """Start a fresh conversation: clear the rolling translation context and
+        echo-detection state, and optionally switch the target language. Used between web
+        sessions so a new meeting doesn't inherit the previous one's background sentences;
+        the web UI keeps ONE translator warm for every language preset (the target is only
+        a prompt parameter -- a second translator would load a second copy of the weights).
+        Queued rather than applied immediately, so any backlog submitted before it still
+        finishes in its own meeting's language and context."""
+        target = normalize_target_language(target_lang).prompt_name if target_lang else None
+        self._queue.put(("reset", target))
 
     def stop(self) -> None:
         self._queue.put(None)
@@ -248,6 +251,13 @@ class Translator(threading.Thread):
             item = self._queue.get()
             if item is None:
                 break
+            if item[0] == "reset":  # applied in queue order, see reset_context
+                if item[1] is not None:
+                    self.target_lang = item[1]
+                if self._history is not None:
+                    self._history.clear()
+                self._last_zh = ""
+                continue
             if item[0] == "preview":
                 _, label, segments, started_at, seq = item
                 with self._preview_lock:  # skip if a newer preview / the final superseded it
