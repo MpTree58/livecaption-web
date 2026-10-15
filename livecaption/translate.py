@@ -62,6 +62,27 @@ def _strip_boilerplate(zh: str) -> str:
     return out or zh.strip()  # if the model emitted ONLY boilerplate, keep the original
 
 
+# Live preview debounce (config.MT_PREVIEW_MIN_WORDS). Sentence enders include the full-width
+# forms qwen3 emits for Chinese; Latin words are counted as words, CJK characters (no spaces
+# between words) two to a word -- a whitespace split would leave a Chinese partial at ~1
+# "word" forever, so zh / mixed meetings never got a preview.
+_PREVIEW_ENDERS = ".?!。？！"
+_LATIN_WORD_RE = re.compile(r"[A-Za-z0-9]+(?:['’][A-Za-z]+)?")
+
+
+def preview_due(text: str, covered: int) -> int | None:
+    """Return the in-progress text's word count when a live preview is due -- it grew by
+    MT_PREVIEW_MIN_WORDS since the last preview (`covered` words) and holds a sentence end --
+    else None. The caller stores the count as the new `covered`."""
+    if config.MT_PREVIEW_MIN_WORDS <= 0:
+        return None
+    cjk = sum(1 for c in text if "一" <= c <= "鿿")
+    words = len(_LATIN_WORD_RE.findall(text)) + cjk // 2
+    if words - covered >= config.MT_PREVIEW_MIN_WORDS and any(c in _PREVIEW_ENDERS for c in text):
+        return words
+    return None
+
+
 class Translator(threading.Thread):
     """on_translation(label, zh_segments, started_at): zh_segments mirrors the utterance's
     speaker segments as [(speaker, translated_text), ...]; started_at is the utterance start

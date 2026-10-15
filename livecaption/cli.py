@@ -22,7 +22,7 @@ from .audio import AudioSource, FileSource, MicSource, SystemAudioSource
 from .languages import normalize_target_language
 from .models import resolve_audiotee
 from .render import FileWriter, Renderer
-from .translate import Translator
+from .translate import Translator, preview_due
 
 # Turn off huggingface_hub download progress bars (they spam the screen even when the model is
 # already cached); download failures still raise. hub is lazily imported when each model loads,
@@ -321,11 +321,9 @@ def main(
             renderer.partial(label, text, started_at, speaker)
             # P2 live preview: retranslate the in-progress utterance once it has grown by
             # MT_PREVIEW_MIN_WORDS and contains a sentence-ender (debounced; latest-wins)
-            if translator and config.MT_PREVIEW_MIN_WORDS > 0:
-                nwords = len(text.split())
-                if nwords - preview_words.get(label, 0) >= config.MT_PREVIEW_MIN_WORDS and any(
-                    c in text for c in ".?!"
-                ):
+            if translator:
+                nwords = preview_due(text, preview_words.get(label, 0))
+                if nwords is not None:
                     preview_words[label] = nwords
                     translator.submit_preview(label, [(speaker, text, None)], started_at)
 

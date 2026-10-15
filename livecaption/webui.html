@@ -107,6 +107,8 @@
   .del { color: var(--del); text-decoration: line-through; }
   .add { color: var(--add); font-weight: 600; }
   #livepartials .en { color: var(--partial); }
+  /* provisional translation of the in-progress sentence; the final translation replaces it */
+  #livepartials .zh { font-weight: 400; opacity: .8; }
   .empty { color: var(--muted); text-align: center; margin-top: 16vh; font-size: 14px; }
 </style>
 </head>
@@ -281,18 +283,29 @@
       const ts = document.createElement("span"); ts.className = "ts";
       const body = document.createElement("span"); body.className = "pbody";
       en.appendChild(ts); en.appendChild(badgeFor(side)); en.appendChild(body);
-      p.appendChild(en);
+      const zh = document.createElement("div"); zh.className = "zh";  // live translation preview
+      p.appendChild(en); p.appendChild(zh);
       // partials share the multi state of livedoc for badge visibility
       if (livedoc.classList.contains("multi")) p.classList.add("multi");
       p.classList.add("doc");
       livepartials.appendChild(p);
     }
+    if (p.dataset.key !== ev.key) p.querySelector(".zh").textContent = "";  // a new sentence
     p.dataset.key = ev.key;
     p.querySelector(".ts").textContent = ev.at;
     const body = p.querySelector(".pbody"); body.textContent = "";
     const sp = speakerSpan(ev.speaker, side); if (sp) body.appendChild(sp);
     body.appendChild(document.createTextNode(ev.text));
     if (viewingLive()) { empty.style.display = "none"; maybeScroll(was); }
+  }
+  function applyPreview(ev) {
+    // provisional translation of the sentence still being spoken; ignore a late one whose
+    // sentence was already finalized (its partial line is gone or moved to the next sentence)
+    const p = document.getElementById("p-" + ev.label);
+    if (!p || p.dataset.key !== ev.key) return;
+    const was = nearBottom();
+    renderZh(p.querySelector(".zh"), ev.segments, sideOf(ev.label));
+    if (viewingLive()) maybeScroll(was);
   }
   function flushPending() {
     livedoc.querySelectorAll(".zh.pending").forEach((z) => { z.classList.remove("pending"); z.textContent = ""; });
@@ -435,6 +448,7 @@
         case "partial": upsertPartial(ev); break;
         case "final": upsertFinal(ev); break;
         case "translation": applyTranslation(ev); break;
+        case "preview": applyPreview(ev); break;
         case "flush": flushPending(); break;
         case "status": onStatus(ev); break;
         case "progress": showProgress(ev); break;

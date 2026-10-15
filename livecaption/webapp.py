@@ -43,7 +43,7 @@ from .audio import AudioSource, MicSource, SystemAudioSource
 from .languages import normalize_target_language
 from .meetings import MeetingStore
 from .models import resolve_audiotee
-from .translate import Translator
+from .translate import Translator, preview_due
 from .websink import WebSink, _key
 
 console = Console()
@@ -355,10 +355,9 @@ class Session:
                 label: str, text: str, started_at: datetime, speaker: int | None = None
             ) -> None:
                 self.sink.partial(label, text, started_at, speaker)
-                if translator and config.MT_PREVIEW_MIN_WORDS > 0:
-                    nwords = len(text.split())
-                    if nwords - self._preview_words.get(label, 0) >= config.MT_PREVIEW_MIN_WORDS \
-                            and any(c in text for c in ".?!"):
+                if translator:
+                    nwords = preview_due(text, self._preview_words.get(label, 0))
+                    if nwords is not None:
                         self._preview_words[label] = nwords
                         translator.submit_preview(label, [(speaker, text, None)], started_at)
 
