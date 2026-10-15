@@ -281,6 +281,7 @@
       const ts = document.createElement("span"); ts.className = "ts";
       const body = document.createElement("span"); body.className = "pbody";
       en.appendChild(ts); en.appendChild(badgeFor(side)); en.appendChild(body);
+      p.appendChild(en);
       // partials share the multi state of livedoc for badge visibility
       if (livedoc.classList.contains("multi")) p.classList.add("multi");
       p.classList.add("doc");
