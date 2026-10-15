@@ -6,12 +6,20 @@ nothing touches ~/.cache/livecaption/meetings.
 
 1. Stop right after the first final: every line of the saved meeting must still get its
    translation (the translator lags the ASR by a sentence or two when Stop is clicked).
+2. Stop while Start is still loading the models: the start backs out -- it must never go
+   on to listen (a pipeline nobody can stop), and it creates no meeting.
+3. Start while Stop is still finishing: refused, instead of the old run's teardown
+   closing the new run's meeting.
+4. A start that fails half-way ("both", the mic already capturing when audiotee dies --
+   simulated with /usr/bin/false as the audiotee binary) tears down what did start and
+   leaves no empty meeting behind.
     uv run python scripts/smoke_web_session.py
 """
 
 import queue
 import subprocess
 import tempfile
+import threading
 import time
 from pathlib import Path
 
@@ -96,6 +104,48 @@ with tempfile.TemporaryDirectory() as td:
     assert lines, "the stopped meeting saved no lines"
     assert not missing, f"translations lost on Stop for: {missing}"
     print("stop keeps every translation: OK")
+
+    # --- 2. Stop while Start is still loading the models ---
+    session._unload_idle_models()  # cold start, so "starting" lasts a few seconds
+    before = {m["id"] for m in store.list()}
+    assert session.start("mic", "en")["ok"]
+    wait_for(events, lambda e: e.get("type") == "status" and e["state"] == "starting",
+             "starting")
+    assert session.stop()["ok"], "Stop during Start was refused"
+    wait_for(events, lambda e: e.get("type") == "status" and e["state"] == "idle", "idle")
+    time.sleep(8)  # long enough for an un-cancelled start to finish loading and go live
+    late = []
+    while not events.empty():
+        ev = events.get_nowait()
+        if ev.get("type") == "status":
+            late.append(ev["state"])
+    assert "listening" not in late, f"the cancelled start went live anyway: {late}"
+    assert not session.state()["running"], "session still marked running"
+    assert {m["id"] for m in store.list()} == before, "the cancelled start created a meeting"
+    print("stop during start backs out: OK")
+
+    # --- 3. Start while Stop is still finishing ---
+    assert session.start("mic", "en")["ok"], "start after a cancelled start was refused"
+    wait_for(events, lambda e: e.get("type") == "status" and e["state"] == "listening",
+             "listening")
+    wait_for(events, lambda e: e.get("type") == "final", "final")
+    session.stop()
+    again = session.start("mic", "en")  # the stop above is still draining / finalizing
+    wait_for(events, lambda e: e.get("type") == "status" and e["state"] == "idle", "idle")
+    assert not again["ok"], "Start was accepted while the previous run was still stopping"
+    print("start during stop is refused: OK")
+
+    # --- 4. A half-way failed start tears down what did start ---
+    session._audiotee_path = "/usr/bin/false"  # resolves as a binary, exits at once
+    before = {m["id"] for m in store.list()}
+    assert session.start("both", "en")["ok"]
+    wait_for(events, lambda e: e.get("type") == "log" and "Failed to start" in e["message"],
+             "the start failure")
+    wait_for(events, lambda e: e.get("type") == "status" and e["state"] == "idle", "idle")
+    alive = [t.name for t in threading.enumerate() if t.name.startswith(("asr-", "file-"))]
+    assert not alive, f"capture/ASR threads left running after the failed start: {alive}"
+    assert {m["id"] for m in store.list()} == before, "the failed start left a meeting behind"
+    print("failed start cleans up: OK")
 
     session.shutdown()
 

@@ -16,6 +16,7 @@ partial/final/translation/preview/flush_pending contract).
 
 from __future__ import annotations
 
+import contextlib
 import gc
 import json
 import os
@@ -67,6 +68,10 @@ LANG_PRESETS = {
 }
 
 
+class _StartCancelled(Exception):
+    """Stop was clicked while Start was still preparing the models (see Session.stop)."""
+
+
 class Session:
     """Owns the live pipeline. The ASR recognizer and the translator are built lazily on first
     use and kept warm, so stopping/starting reuses already-loaded models. Only the current
@@ -115,9 +120,14 @@ class Session:
         self._idle_unload_min = idle_unload_min
         self._idle_timer: threading.Timer | None = None
 
-        # serialize start/stop; _running is the user-visible state
+        # Run lifecycle, guarded by _op_lock: idle -> starting -> listening -> stopping -> idle.
+        # Start is only accepted when idle (a Start racing a still-finishing Stop would have
+        # its meeting closed by the old run's teardown); Stop while starting sets
+        # _cancel_start and the start thread backs out at its next checkpoint.
         self._op_lock = threading.Lock()
-        self._running = False
+        self._phase = "idle"
+        self._cancel_start = False
+        self._stop_thread: threading.Thread | None = None
 
         # per-session, rebuilt on each start
         self._sources: list[AudioSource] = []
@@ -133,16 +143,19 @@ class Session:
     def start(self, source_kind: str, lang: str | None = None) -> dict:
         lang = lang or self._default_lang
         with self._op_lock:
-            if self._running:
+            if self._phase == "stopping":
+                return {"ok": False, "error": "still stopping the previous recording"}
+            if self._phase != "idle":
                 return {"ok": False, "error": "already running"}
             if source_kind not in ("mic", "system", "both"):
                 return {"ok": False, "error": f"bad source {source_kind!r}"}
             if lang not in self._presets:
                 return {"ok": False, "error": f"bad lang {lang!r}"}
-            self._running = True
+            self._phase = "starting"
+            self._cancel_start = False
             self._lang = lang
             self._cancel_idle_unload()
-        self.sink.status("starting", source_kind, lang=lang)
+            self.sink.status("starting", source_kind, lang=lang)
         threading.Thread(
             target=self._start_impl, args=(source_kind, lang), daemon=True, name="session-start"
         ).start()
@@ -150,18 +163,26 @@ class Session:
 
     def stop(self) -> dict:
         with self._op_lock:
-            if not self._running:
+            if self._phase == "starting":
+                # still preparing models: the start thread backs out at its next checkpoint
+                # and reports idle itself
+                self._cancel_start = True
+                self._phase = "stopping"
+                self.sink.status("stopping", None)
+                return {"ok": True}
+            if self._phase != "listening":
                 return {"ok": False, "error": "not running"}
-            self._running = False
-        self.sink.status("stopping", None)
-        threading.Thread(
-            target=self._stop_impl, daemon=True, name="session-stop"
-        ).start()
+            self._phase = "stopping"
+            self.sink.status("stopping", None)
+            self._stop_thread = threading.Thread(
+                target=self._stop_impl, daemon=True, name="session-stop"
+            )
+            self._stop_thread.start()
         return {"ok": True}
 
     def state(self) -> dict:
         return {
-            "running": self._running,
+            "running": self._phase in ("starting", "listening"),
             "translate": self._translate,
             "meeting": self._meeting.id if self._meeting else None,
             "lang": self._lang,
@@ -180,6 +201,11 @@ class Session:
         self.sink.translation(label, zh_segments, started_at)
 
     # --- pipeline construction (models stay warm for the current language preset) ---
+    def _check_cancel(self) -> None:
+        """Start-thread checkpoint: back out if Stop was clicked while models were loading."""
+        if self._cancel_start:
+            raise _StartCancelled
+
     def _stage(self, message: str) -> None:
         """A model-preparation stage notice, shown on the persistent progress line (not the
         auto-hiding banner — during a long first start that line is the user's only feedback,
@@ -197,6 +223,7 @@ class Session:
         if self._translate:
             repos.append((self._mt_model_id, "translation model"))
         for i, (repo, what) in enumerate(repos, 1):
+            self._check_cancel()  # a multi-GB download is the likeliest time to change one's mind
             try:
                 _download_model(repo, f"Downloading {what} ({i}/{len(repos)})",
                                 self.sink.progress)
@@ -262,7 +289,7 @@ class Session:
         claimed the session (then nothing is unloaded) or waits for the unload to finish."""
         with self._op_lock:
             self._idle_timer = None
-            if self._running or (self._recognizer is None and self._translator is None):
+            if self._phase != "idle" or (self._recognizer is None and self._translator is None):
                 return
             if self._translator is not None:
                 # idle means drained: the thread is just waiting on its queue
@@ -306,27 +333,21 @@ class Session:
         return sources
 
     def _start_impl(self, source_kind: str, lang: str) -> None:
+        sources: list[AudioSource] = []
+        workers: list[AsrWorker] = []
+        meeting = None
         try:
             preset = self._presets[lang]
             self._prepare_models(preset)
+            self._check_cancel()
             recognizer = self._get_recognizer(preset)
+            self._check_cancel()
             translator = self._get_translator(preset["target_prompt"]) if self._translate else None
             if translator is not None:
                 # fresh meeting: don't inherit the previous session's rolling context, and
                 # translate in this preset's direction
                 translator.reset_context(preset["target_prompt"])
             self._preview_words.clear()
-
-            sources = self._build_sources(source_kind)
-            meeting = self.store.create(
-                source=source_kind,
-                asr_lang=preset["asr_lang"],
-                target_lang=preset["target_prompt"] if self._translate else None,
-                created_at=datetime.now(),
-                lang=lang,
-                lang_label=preset["label"],
-            )
-            self._meeting = meeting
 
             def handle_partial(
                 label: str, text: str, started_at: datetime, speaker: int | None = None
@@ -354,22 +375,60 @@ class Session:
                 self.sink.log("warn", "ASR worker crashed; stopping.")
                 self.stop()
 
-            workers: list[AsrWorker] = []
-            for src in sources:
-                worker = AsrWorker(
-                    recognizer, src.queue, src.label, handle_partial, handle_final,
-                    on_error=on_worker_error,
-                    use_audio_timestamps=False,
+            # Commit point, atomic with respect to stop(): either Stop already asked to
+            # cancel (back out before any capture starts), or it sees "listening" with the
+            # sources and workers in place for _stop_impl to tear down.
+            with self._op_lock:
+                self._check_cancel()
+                sources = self._build_sources(source_kind)
+                meeting = self.store.create(
+                    source=source_kind,
+                    asr_lang=preset["asr_lang"],
+                    target_lang=preset["target_prompt"] if self._translate else None,
+                    created_at=datetime.now(),
+                    lang=lang,
+                    lang_label=preset["label"],
                 )
-                workers.append(worker)
-                worker.start()
-                src.start()
+                self._meeting = meeting
+                for src in sources:
+                    worker = AsrWorker(
+                        recognizer, src.queue, src.label, handle_partial, handle_final,
+                        on_error=on_worker_error,
+                        use_audio_timestamps=False,
+                    )
+                    workers.append(worker)
+                    worker.start()
+                    src.start()
 
-            self._sources = sources
-            self._workers = workers
-            self._source_kind = source_kind
-
-            self.sink.status("listening", source_kind, meeting.id, lang=lang)
+                self._sources = sources
+                self._workers = workers
+                self._source_kind = source_kind
+                self._phase = "listening"
+                self.sink.status("listening", source_kind, meeting.id, lang=lang)
+        except _StartCancelled:
+            with self._op_lock:
+                self._phase = "idle"
+                self.sink.status("idle", None)
+            self._arm_idle_unload()  # whatever loaded before the cancel
+        except Exception as e:  # noqa: BLE001 -- any failure must not leave a half-started run
+            # Tear down whatever did start -- e.g. "both" with the mic already capturing when
+            # audiotee fails -- or it would keep recording into a meeting nobody can stop.
+            self._meeting = None
+            for src in sources:
+                with contextlib.suppress(Exception):
+                    src.stop()
+            for worker in workers:
+                worker.join(timeout=5)
+            if meeting is not None:
+                # never went live, so at most a fraction of a second was captured: the user
+                # saw a failed Start, not a meeting
+                self.store.delete(meeting.id)
+            self.sink.log("warn", f"Failed to start: {e}")
+            with self._op_lock:
+                self._phase = "idle"
+                self.sink.status("idle", None)
+            self._arm_idle_unload()  # whatever did load before the failure
+        else:  # live: notices only, outside the try so they can't tear down a running run
             self.sink.log("info", f"Listening: {' + '.join(s.label for s in sources)}")
             if any(isinstance(s, SystemAudioSource) for s in sources):
                 self.sink.log(
@@ -377,13 +436,6 @@ class Session:
                     "If system audio stays empty, Terminal likely lacks System Audio "
                     "Recording permission — see README.",
                 )
-        except Exception as e:  # noqa: BLE001 -- any failure must not leave a half-started run
-            self.sink.log("warn", f"Failed to start: {e}")
-            self.sink.status("idle", None)
-            self._meeting = None
-            with self._op_lock:
-                self._running = False
-            self._arm_idle_unload()  # whatever did load before the failure
 
     def _stop_impl(self) -> None:
         for src in self._sources:
@@ -406,8 +458,10 @@ class Session:
             self._sync_meeting(meta)
         self._sources = []
         self._workers = []
-        # idle: the just-ended meeting is now saved; the browser refetches the list
-        self.sink.status("idle", None)
+        with self._op_lock:
+            self._phase = "idle"
+            # idle: the just-ended meeting is now saved; the browser refetches the list
+            self.sink.status("idle", None)
         self._arm_idle_unload()
 
     def _sync_meeting(self, meta: dict) -> None:
@@ -466,13 +520,19 @@ class Session:
         return self.store.delete(mid)
 
     def shutdown(self) -> None:
-        """Server exit: stop the run (if any) and tear down the warm translator thread."""
-        if self._running:
-            with self._op_lock:
-                self._running = False
-            self._stop_impl()
+        """Server exit: finish the run (if any) and tear down the warm translator thread."""
         with self._op_lock:
+            phase = self._phase
+            if phase == "starting":
+                self._cancel_start = True  # the (daemon) start thread backs out on its own
+            elif phase == "listening":
+                self._phase = "stopping"
             self._cancel_idle_unload()
+        if phase == "listening":
+            self._stop_impl()
+        elif phase == "stopping" and self._stop_thread is not None:
+            # a Stop already in flight: let it close the meeting before the process exits
+            self._stop_thread.join(timeout=config.WEB_STOP_DRAIN_SEC + 20)
         if self._translator is not None:
             self._translator.stop()
             self._translator.join(timeout=10)
