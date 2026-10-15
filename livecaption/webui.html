@@ -50,13 +50,21 @@
   #lang:disabled { opacity: .5; cursor: not-allowed; }
   #toggle { padding: 7px 18px; border: 0; border-radius: 8px; font: inherit; font-weight: 600; cursor: pointer; background: var(--add); color: #05230e; }
   #toggle.running { background: var(--m3); color: #fff; }
+  #toggle.cancel { background: var(--panel2); color: var(--fg); box-shadow: inset 0 0 0 1px var(--border); }
+  #toggle:disabled { opacity: .6; cursor: default; }
   #status { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: 13px; }
   #status .led { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); }
   #status.listening .led { background: var(--add); box-shadow: 0 0 6px var(--add); }
   #status.starting .led, #status.stopping .led { background: var(--warn); }
+  #status.offline { color: var(--m3); }
+  #status.offline .led { background: var(--m3); }
   .spacer { flex: 1; }
   label.chk { color: var(--muted); font-size: 13px; display: inline-flex; align-items: center; gap: 5px; cursor: pointer; }
-  #banner { display: none; padding: 8px 16px; background: var(--warnbg); color: var(--warn); border-bottom: 1px solid var(--border); font-size: 13px; }
+  #banner { display: none; align-items: center; gap: 12px; padding: 8px 16px; background: var(--warnbg); color: var(--warn); border-bottom: 1px solid var(--border); font-size: 13px; }
+  #banner.shown { display: flex; }
+  #bannertext { flex: 1; }
+  #bannerclose { background: none; border: 0; color: inherit; font-size: 17px; line-height: 1; padding: 0 2px; cursor: pointer; opacity: .7; }
+  #bannerclose:hover { opacity: 1; }
   #progress { display: none; padding: 8px 16px; background: var(--panel); color: var(--muted); border-bottom: 1px solid var(--border); font-size: 13px; }
   #progress .bar { height: 4px; background: var(--panel2); border: 1px solid var(--border); border-radius: 3px; margin-top: 6px; overflow: hidden; }
   #progress .bar i { display: block; height: 100%; width: 0%; background: var(--accent); transition: width .6s; }
@@ -77,6 +85,8 @@
 
   /* --- main pane --- */
   #pane { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+  /* nothing selected (no meetings yet / the selected one was deleted): no dead title, links or notes */
+  #pane.nosel #viewhead, #pane.nosel #notespanel { display: none; }
   #viewhead { padding: 12px 16px 10px; border-bottom: 1px solid var(--border); }
   #title { font-size: 18px; font-weight: 700; border: 1px solid transparent; border-radius: 6px; background: transparent; color: var(--fg); font-family: inherit; padding: 3px 6px; width: 100%; }
   #title:hover { border-color: var(--border); }
@@ -124,12 +134,12 @@
   </div>
   <select id="lang" title="Spoken language → translation"></select>
   <button id="toggle">Start</button>
-  <div id="status"><span class="led"></span><span id="statustext">idle</span></div>
+  <div id="status" aria-live="polite"><span class="led"></span><span id="statustext">Ready</span></div>
   <div class="spacer"></div>
   <label class="chk"><input type="checkbox" id="diffchk" checked> diff</label>
   <label class="chk"><input type="checkbox" id="autochk" checked> auto-scroll</label>
 </header>
-<div id="banner"></div>
+<div id="banner" role="status"><span id="bannertext"></span><button id="bannerclose" title="Dismiss" aria-label="Dismiss">×</button></div>
 <div id="progress">
   <span id="progresstext"></span>
   <div class="bar"><i id="progressfill"></i></div>
@@ -140,7 +150,7 @@
     <input id="search" type="search" placeholder="Search meetings…">
     <div id="meetinglist"></div>
   </aside>
-  <section id="pane">
+  <section id="pane" class="nosel">
     <div id="viewhead">
       <input id="title" placeholder="Untitled meeting">
       <div id="viewmeta">
@@ -170,7 +180,8 @@
   "use strict";
   const $ = (s) => document.querySelector(s);
   const scroll = $("#scroll"), livedoc = $("#livedoc"), livepartials = $("#livepartials");
-  const pastdoc = $("#pastdoc"), empty = $("#empty"), banner = $("#banner");
+  const pastdoc = $("#pastdoc"), empty = $("#empty"), banner = $("#banner"), pane = $("#pane");
+  const bannerText = $("#bannertext");
   const progressEl = $("#progress"), progressText = $("#progresstext"), progressFill = $("#progressfill");
   const toggle = $("#toggle"), statusEl = $("#status"), statusText = $("#statustext");
   const sourceBtns = Array.from(document.querySelectorAll("#source button"));
@@ -179,16 +190,25 @@
   const titleEl = $("#title"), metaText = $("#metatext"), exportA = $("#export"),
         deleteBtn = $("#delete"), notesEl = $("#notes"), notesaved = $("#notesaved");
 
-  const st = { running: false, liveId: null, selected: null, source: "both", lang: "en",
-               meetings: [], liveSeen: new Set() };
+  const st = { running: false, phase: "idle", liveId: null, liveMeta: null, selected: null,
+               source: "both", lang: "en", meetings: [], liveSeen: new Set() };
   let bannerTimer = null, notesTimer = null;
+  const EMPTY_IDLE = "Pick a source and click Start — or select a past meeting.";
+  const EMPTY_LIVE = "Listening — captions appear here as people speak.";
 
   // --- api ---
+  // Every call resolves, never rejects: a network failure or a non-JSON reply becomes
+  // {ok: false, error}, so callers can report it (an unhandled rejection used to abort e.g.
+  // the status handler when the engine restarted).
+  const UNREACHABLE = "can't reach the livecaption engine";
+  const call = (p, opts) => fetch(p, opts)
+    .then((r) => r.json().catch(() => ({ ok: false, error: "HTTP " + r.status })))
+    .catch(() => ({ ok: false, error: UNREACHABLE }));
   const api = {
-    get: (p) => fetch(p).then((r) => r.json()),
-    post: (p, b) => fetch(p, { method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(b || {}) }).then((r) => r.json()),
-    del: (p) => fetch(p, { method: "DELETE" }).then((r) => r.json()),
+    get: (p) => call(p),
+    post: (p, b) => call(p, { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(b || {}) }),
+    del: (p) => call(p, { method: "DELETE" }),
   };
 
   // --- shared render helpers (used for both live stream and saved meetings) ---
@@ -267,9 +287,17 @@
     const was = nearBottom();
     let u = document.getElementById("u-" + cssId(ev.key));
     const rec = { key: ev.key, label: ev.label, at: ev.at, en: ev.segments, zh: null };
-    if (!u) { livedoc.appendChild(makeUtterance(rec)); }
+    if (!u) { livedoc.appendChild(makeUtterance(rec)); updateLiveCount(); }
     else { renderEn(u.querySelector(".enbody"), ev.segments, sideOf(ev.label)); }
     if (viewingLive()) { empty.style.display = "none"; maybeScroll(was); }
+  }
+  // the live meeting's line count, in the header and its list entry (both were frozen at the
+  // value fetched when the meeting was opened -- "0 lines" for a whole recording)
+  function updateLiveCount() {
+    const n = livedoc.children.length;
+    if (viewingLive() && st.liveMeta) metaText.textContent = metaSummary({ ...st.liveMeta, utterances: n });
+    const c = listEl.querySelector('.mi[data-id="' + st.liveId + '"] .n');
+    if (c) c.textContent = "· " + n;
   }
   function applyTranslation(ev) {
     const u = document.getElementById("u-" + cssId(ev.key)); if (!u) return;
@@ -364,7 +392,8 @@
         const r = document.createElement("span"); r.className = "rec"; r.textContent = "● REC"; meta.appendChild(r);
       }
       const d = document.createElement("span"); d.textContent = fmtDate(m.created_at); meta.appendChild(d);
-      const c = document.createElement("span"); c.textContent = "· " + (m.utterances || 0); meta.appendChild(c);
+      const c = document.createElement("span"); c.className = "n"; meta.appendChild(c);
+      c.textContent = "· " + (m.id === st.liveId ? Math.max(m.utterances || 0, livedoc.children.length) : (m.utterances || 0));
       if (m.source) { const s = document.createElement("span"); s.textContent = "· " + m.source; meta.appendChild(s); }
       if (m.lang_label) { const l = document.createElement("span"); l.textContent = "· " + m.lang_label; meta.appendChild(l); }
       el.appendChild(t); el.appendChild(meta);
@@ -396,24 +425,28 @@
     st.selected = id;
     markSelected(id);
     // load meeting record (for title, notes, meta, and — for past — utterances)
-    const data = await api.get("/meetings/" + id).catch(() => null);
+    const data = await api.get("/meetings/" + id);
     // a later click won the race: rendering this older response would show one meeting while
     // st.selected (where notes and renames are saved) is another
     if (seq !== selectSeq) return;
-    if (!data || data.error) return;
+    if (data.error) { showBanner("warn", "Couldn't open that meeting: " + data.error); return; }
+    pane.classList.remove("nosel");
     titleEl.value = data.title || "";
     if (!(same && document.activeElement === notesEl)) {  // never yank text from under the cursor
       notesEl.value = data.notes || ""; notesaved.textContent = "";
     }
-    metaText.textContent = metaSummary({ created_at: data.created_at, source: data.source,
-      lang_label: data.lang_label, utterances: (data.utterances || []).length });
+    const meta = { created_at: data.created_at, source: data.source, lang_label: data.lang_label };
+    metaText.textContent = metaSummary({ ...meta, utterances: (data.utterances || []).length });
     exportA.href = "/meetings/" + id + "/export.md";
     const isLive = (id === st.liveId);
     deleteBtn.style.display = isLive ? "none" : "";
     // render body: live shows the streaming DOM, past renders from saved utterances
     if (isLive) {
+      st.liveMeta = meta;
       mergeSavedIntoLive(data.utterances || []);
+      updateLiveCount();
       livedoc.style.display = ""; livepartials.style.display = ""; pastdoc.style.display = "none";
+      empty.textContent = EMPTY_LIVE;
       empty.style.display = (livedoc.children.length || livepartials.children.length) ? "none" : "";
     } else {
       livedoc.style.display = "none"; livepartials.style.display = "none"; pastdoc.style.display = "";
@@ -435,9 +468,9 @@
     if (notesTimer) { clearTimeout(notesTimer); notesTimer = null; }
     const p = notesPending; notesPending = null;
     if (!p) return Promise.resolve();
-    return api.post("/meetings/" + p.id + "/notes", { notes: p.notes })
-      .then((r) => { if (st.selected === p.id) notesaved.textContent = r.ok ? "saved" : "not saved"; })
-      .catch(() => { if (st.selected === p.id) notesaved.textContent = "not saved (server unreachable)"; });
+    return api.post("/meetings/" + p.id + "/notes", { notes: p.notes }).then((r) => {
+      if (st.selected === p.id) notesaved.textContent = r.ok ? "saved" : "not saved: " + (r.error || "error");
+    });
   }
   notesEl.addEventListener("input", () => {
     if (!st.selected) return;
@@ -469,7 +502,8 @@
     const r = await api.del("/meetings/" + st.selected);
     if (r.ok) {
       st.selected = null; pastdoc.textContent = ""; titleEl.value = ""; notesEl.value = "";
-      metaText.textContent = ""; empty.style.display = "";
+      metaText.textContent = ""; pane.classList.add("nosel");
+      empty.textContent = EMPTY_IDLE; empty.style.display = "";
       await refreshList();
       if (st.meetings.length) selectMeeting(st.meetings[0].id);
     }
@@ -503,7 +537,14 @@
         case "log": showBanner(ev.level, ev.message); break;
       }
     };
-    es.onerror = () => {};
+    // EventSource reconnects by itself and the engine replays its status on connect, which
+    // restores the controls; meanwhile say so instead of showing a stale "Listening"
+    es.onerror = () => {
+      statusEl.className = "offline"; statusText.textContent = "Reconnecting…";
+      toggle.disabled = true;
+    };
+    // back online: a warning about the engine being unreachable is stale now
+    es.onopen = () => { if (bannerText.textContent.includes(UNREACHABLE)) hideBanner(); };
   }
 
   function showProgress(ev) {
@@ -516,16 +557,21 @@
     progressFill.parentElement.style.display = ev.pct != null ? "block" : "none";
   }
 
+  const STATUS_TEXT = { idle: "Ready", starting: "Starting…", listening: "Listening", stopping: "Stopping…" };
+  const TOGGLE_TEXT = { idle: "Start", starting: "Cancel", listening: "Stop", stopping: "Stopping…" };
   function setStatusPill(state) {
+    st.phase = state;
     st.running = (state === "listening" || state === "starting" || state === "stopping");
     if (state !== "starting") progressEl.style.display = "none";
-    statusEl.className = state; statusText.textContent = state;
-    toggle.textContent = (state === "idle") ? "Start"
-      : (state === "starting" ? "Starting…" : (state === "stopping" ? "Stopping…" : "Stop"));
+    statusEl.className = state; statusText.textContent = STATUS_TEXT[state] || state;
+    toggle.textContent = TOGGLE_TEXT[state] || "Start";
     toggle.classList.toggle("running", state === "listening" || state === "stopping");
-    toggle.disabled = (state === "starting" || state === "stopping");
+    // model loading can take minutes on a first run: Start can be cancelled while it lasts
+    toggle.classList.toggle("cancel", state === "starting");
+    toggle.disabled = (state === "stopping");
     sourceBtns.forEach((b) => (b.disabled = st.running));
     langEl.disabled = st.running;
+    document.title = state === "listening" ? "● Listening · livecaption" : "livecaption";
   }
 
   async function onStatus(ev) {
@@ -548,13 +594,16 @@
     }
   }
 
+  // info notices fade after 6 s; warnings stay until dismissed (×) or replaced
+  function hideBanner() { banner.classList.remove("shown"); }
   function showBanner(level, msg) {
-    banner.textContent = msg; banner.style.display = "block";
+    bannerText.textContent = msg; banner.classList.add("shown");
     banner.style.color = level === "warn" ? "var(--warn)" : "var(--muted)";
     banner.style.background = level === "warn" ? "var(--warnbg)" : "var(--panel)";
     if (bannerTimer) clearTimeout(bannerTimer);
-    if (level !== "warn") bannerTimer = setTimeout(() => { banner.style.display = "none"; }, 6000);
+    bannerTimer = level !== "warn" ? setTimeout(hideBanner, 6000) : null;
   }
+  $("#bannerclose").addEventListener("click", hideBanner);
 
   // --- per-browser preferences (best effort: storage may be unavailable, e.g. private mode) ---
   const prefs = {
@@ -584,15 +633,20 @@
   });
   autoChk.checked = prefs.get("autoscroll", true);
   autoChk.addEventListener("change", () => prefs.set("autoscroll", autoChk.checked));
-  toggle.addEventListener("click", () => {
-    if (!st.running) api.post("/start", { source: st.source, lang: st.lang });
-    else api.post("/stop", {});
+  toggle.addEventListener("click", async () => {
+    // idle: Start; starting: Cancel (stops the model loading); listening: Stop. The reply only
+    // says whether the request was accepted -- progress arrives as status events -- so only a
+    // refusal needs showing (e.g. another tab is already recording, or the engine is down).
+    const starting = st.phase === "idle";
+    const r = starting ? await api.post("/start", { source: st.source, lang: st.lang })
+                       : await api.post("/stop", {});
+    if (!r.ok) showBanner("warn", (starting ? "Couldn't start: " : "Couldn't stop: ") + (r.error || "unknown error"));
   });
 
   // --- init ---
   (async function init() {
     await refreshList();
-    const state = await api.get("/state").catch(() => ({}));
+    const state = await api.get("/state");
     // populate the language picker from the server's presets
     (state.langs || []).forEach((l) => {
       const o = document.createElement("option");
@@ -607,6 +661,8 @@
     if (!state.running && sourceBtns.some((b) => b.dataset.src === lastSource)) setSource(lastSource);
     if (state.running && state.meeting) { st.liveId = state.meeting; }
     if (st.meetings.length) selectMeeting((st.liveId || st.meetings[0].id));
+    else empty.textContent = "Pick a source and click Start to record your first meeting.";
+    if (state.error) showBanner("warn", "The livecaption engine isn't responding (" + state.error + ") — retrying…");
     connect();
   })();
 })();
