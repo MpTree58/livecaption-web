@@ -352,6 +352,7 @@
     items.forEach((m) => {
       const el = document.createElement("div");
       el.className = "mi" + (m.id === st.selected ? " sel" : "");
+      el.dataset.id = m.id;
       const t = document.createElement("div"); t.className = "t"; t.textContent = m.title || m.id;
       const meta = document.createElement("div"); meta.className = "m";
       if (m.id === st.liveId) {
@@ -381,14 +382,24 @@
     return parts.join(" · ");
   }
 
+  const markSelected = (id) => Array.from(listEl.children).forEach((c) => c.classList.toggle("sel", c.dataset.id === id));
+  let selectSeq = 0;
   async function selectMeeting(id) {
+    const seq = ++selectSeq;
+    const same = st.selected === id;
+    await saveNotesNow();  // typed notes belong to the meeting being left (or reloaded)
     st.selected = id;
-    Array.from(listEl.children).forEach((c) => c.classList.remove("sel"));
+    markSelected(id);
     // load meeting record (for title, notes, meta, and — for past — utterances)
     const data = await api.get("/meetings/" + id).catch(() => null);
+    // a later click won the race: rendering this older response would show one meeting while
+    // st.selected (where notes and renames are saved) is another
+    if (seq !== selectSeq) return;
     if (!data || data.error) return;
     titleEl.value = data.title || "";
-    notesEl.value = data.notes || ""; notesaved.textContent = "";
+    if (!(same && document.activeElement === notesEl)) {  // never yank text from under the cursor
+      notesEl.value = data.notes || ""; notesaved.textContent = "";
+    }
     metaText.textContent = metaSummary({ created_at: data.created_at, source: data.source,
       lang_label: data.lang_label, utterances: (data.utterances || []).length });
     exportA.href = "/meetings/" + id + "/export.md";
@@ -410,23 +421,32 @@
         e.textContent = "No transcript in this meeting."; pastdoc.appendChild(e);
       }
     }
-    // reflect selection highlight in the list
-    Array.from(listEl.children).forEach((c) => {
-      const t = c.querySelector(".t"); c.classList.toggle("sel", t && t.textContent === (data.title || id));
-    });
     refreshList();
   }
 
-  // --- notes autosave ---
+  // --- notes autosave (debounced; flushed when switching meetings or leaving the page) ---
+  let notesPending = null;  // {id, notes} typed but not sent yet
+  function saveNotesNow() {
+    if (notesTimer) { clearTimeout(notesTimer); notesTimer = null; }
+    const p = notesPending; notesPending = null;
+    if (!p) return Promise.resolve();
+    return api.post("/meetings/" + p.id + "/notes", { notes: p.notes })
+      .then((r) => { if (st.selected === p.id) notesaved.textContent = r.ok ? "saved" : "not saved"; })
+      .catch(() => { if (st.selected === p.id) notesaved.textContent = "not saved (server unreachable)"; });
+  }
   notesEl.addEventListener("input", () => {
     if (!st.selected) return;
     notesaved.textContent = "saving…";
+    notesPending = { id: st.selected, notes: notesEl.value };
     if (notesTimer) clearTimeout(notesTimer);
-    const id = st.selected, val = notesEl.value;
-    notesTimer = setTimeout(async () => {
-      await api.post("/meetings/" + id + "/notes", { notes: val });
-      if (st.selected === id) notesaved.textContent = "saved";
-    }, 700);
+    notesTimer = setTimeout(saveNotesNow, 700);
+  });
+  // closing the tab inside the debounce window would drop the last keystrokes
+  window.addEventListener("pagehide", () => {
+    if (!notesPending) return;
+    navigator.sendBeacon("/meetings/" + notesPending.id + "/notes",
+      new Blob([JSON.stringify({ notes: notesPending.notes })], { type: "application/json" }));
+    notesPending = null;
   });
 
   // --- title rename ---
