@@ -22,9 +22,10 @@ breaks the rolling decode can insert), and the inline diff vs the streaming text
 nemotron's (CJK-aware, see asr.py:_inline_diff). See asr.py for the nemotron backend.
 
 `mlx-qwen3-asr` is an optional dependency (the `[qwen]` extra); it is imported lazily so a
-nemotron-only install never needs it. Model weights load once (process-local LRU cache in
-the package, plus we pass the loaded model object into every feed/finish call) so no
-per-utterance reload.
+nemotron-only install never needs it. Model weights load once: we keep the loaded model
+object, pass it into every feed/finish call, and run offline re-decodes through a
+`Session` bound to it -- so no per-utterance reload, and nothing parked in the package's
+process-global model cache (dropping the recognizer really frees the weights).
 """
 
 from __future__ import annotations
@@ -154,7 +155,7 @@ class QwenRecognizer:
         log: Callable[[str], None] | None = None,
     ):
         from mlx_audio.vad import load as load_vad
-        from mlx_qwen3_asr import load_model
+        from mlx_qwen3_asr import Session, load_model
 
         say = log or (lambda _m: None)
         self.model_id = asr_model
@@ -163,6 +164,13 @@ class QwenRecognizer:
         # load_model -> (model, config); keep the model object to pass into feed/finish so
         # the decoder never reloads weights between utterances.
         self.model_obj, self._model_config = load_model(asr_model)
+        # Offline re-decodes (two-pass, word timestamps) go through an explicit Session bound
+        # to this model: the module-level transcribe(model=<loaded object>) takes its
+        # tokenizer from the package default Qwen/Qwen3-ASR-0.6B instead, so the first final
+        # downloaded that whole 1.8 GB repo (while holding MLX_LOCK, freezing captions and
+        # translation) and, offline, made every two-pass silently fall back to the streaming
+        # text. Session reads the tokenizer from this model's own snapshot.
+        self.session = Session(self.model_obj)
         say(f"Loading VAD model {config.VAD_MODEL} …")
         self.vad = load_vad(config.VAD_MODEL)
         # Sortformer for diarization (it loads via the VAD loader too).
@@ -267,14 +275,13 @@ class QwenOnlineStream:
     """
 
     def __init__(self, rec: QwenRecognizer):
-        from mlx_qwen3_asr import transcribe
         from mlx_qwen3_asr.streaming import feed_audio, finish_streaming, init_streaming
 
         self._rec = rec
         self._init_streaming = init_streaming
         self._feed_audio = feed_audio
         self._finish_streaming = finish_streaming
-        self._transcribe = transcribe
+        self._transcribe = rec.session.transcribe  # see QwenRecognizer.session
         self._aligner = rec.aligner  # None unless word-level diarization is enabled
         self._vad = rec.vad
         self._vad_state = rec.vad.initial_state(sample_rate=config.SAMPLE_RATE)
@@ -549,15 +556,12 @@ class QwenOnlineStream:
                 if want_words:
                     result = self._transcribe(
                         audio,
-                        model=self._rec.model_obj,
                         language=self._rec.language,
                         return_timestamps=True,
                         forced_aligner=self._aligner,
                     )
                 else:
-                    result = self._transcribe(
-                        audio, model=self._rec.model_obj, language=self._rec.language
-                    )
+                    result = self._transcribe(audio, language=self._rec.language)
             text = (result.text or "").strip()
             words = getattr(result, "segments", None) if want_words else None
             return text, words
