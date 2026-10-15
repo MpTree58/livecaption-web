@@ -33,10 +33,12 @@ from livecaption.websink import WebSink
 # preset -> (voice, text spoken into the fake mic)
 CLIPS = {
     "en": ("Samantha", "Let's review the quarterly budget and the hiring plan before Friday."),
+    "en-qwen": ("Samantha", "Let's review the quarterly budget and the hiring plan before Friday."),
     "zh": ("Tingting", "我们下周一开会讨论新产品的上线计划。"),
     "mixed": ("Tingting", "我们今天先 review 一下 budget，然后讨论 hiring plan。"),
 }
-SEQUENCE = ["en", "mixed", "zh", "en"]
+# mixed -> en-qwen -> zh share one qwen3 model (only its language changes): no reload, no growth
+SEQUENCE = ["en", "mixed", "en-qwen", "zh", "en"]
 TIMEOUT = 600  # first loads can include a cold disk read of several GB
 IDLE_UNLOAD_MIN = 0.15  # 9 s -- far longer than the gap between the runs below
 
@@ -128,6 +130,8 @@ with tempfile.TemporaryDirectory() as td:
         wait_for(events, lambda e: e.get("type") == "status" and e["state"] == "listening",
                  f"{lang} listening")
         ready_sec = time.monotonic() - t0
+        fin = wait_for(events, lambda e: e.get("type") == "final", f"{lang} final")
+        heard = " ".join(s["text"] for s in fin["segments"])
         tr = wait_for(events, lambda e: e.get("type") == "translation", f"{lang} translation")
         zh = " ".join(s["zh"] for s in tr["segments"])
         session.stop()
@@ -135,13 +139,18 @@ with tempfile.TemporaryDirectory() as td:
                  f"{lang} idle")
         mx.clear_cache()
         rows.append((lang, ready_sec, mx.get_active_memory() / 1e9, footprint_gb()))
-        print(f"{lang:>5} → {target}: ready {ready_sec:5.1f}s  "
-              f"MLX active {rows[-1][2]:.2f} GB  footprint {rows[-1][3]:.2f} GB  | {zh}")
+        print(f"{lang:>7} → {target}: ready {ready_sec:5.1f}s  "
+              f"MLX active {rows[-1][2]:.2f} GB  footprint {rows[-1][3]:.2f} GB  | {heard} | {zh}")
         # the shared translator must have switched direction for this preset
         if target == "English":
             assert not has_cjk(zh), f"{lang}: expected an English translation, got {zh!r}"
         else:
             assert has_cjk(zh), f"{lang}: expected a Chinese translation, got {zh!r}"
+        # en-qwen reuses the model loaded for "mixed" (forced Chinese): its language must
+        # have switched, or English speech comes out transliterated / translated
+        if lang == "en-qwen":
+            assert not has_cjk(heard), f"en-qwen transcribed English as {heard!r}"
+            assert abs(rows[-1][2] - rows[-2][2]) < 0.1, "en-qwen loaded a second qwen3 model"
 
     first_en, last_en = rows[0], rows[-1]
     peak = max(r[2] for r in rows)

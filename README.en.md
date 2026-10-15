@@ -34,6 +34,8 @@ It sets everything up and creates `/Applications/livecaption.app` (auto-starts a
 
 Always running doesn't mean always holding memory: the web UI keeps only the current language preset's models loaded (about 3.5 GB of unified memory for English, 4.7 GB for Chinese / mixed; switching language frees the previous set first), frees all of them 5 minutes after you stop recording, and reloads them from the disk cache on the next Start (a few seconds). Change the delay with `livecaption-web --idle-unload MINUTES`; `0` keeps them loaded.
 
+The **English (accurate) → 中文** preset transcribes English with Qwen3-ASR: measurably fewer errors (native read speech 5.4% → 3.7%, Chinese-accented conversational English 26.2% → 17.0%, see `scripts/eval_asr.py`), at the cost of a live line that refreshes about every 2 s (the default English preset updates word by word), one speaker label per sentence, and ~1.2 GB more memory. It shares one model with the Chinese / mixed presets, so switching between them doesn't reload.
+
 Manual command-line install:
 
 ```bash

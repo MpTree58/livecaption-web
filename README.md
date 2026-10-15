@@ -34,6 +34,8 @@ curl -LsSf https://raw.githubusercontent.com/MpTree58/livecaption-web/main/scrip
 
 常驻不等于一直占内存：网页端只保留当前语言预设的模型（英文约 3.5GB、中文/中英混合约 4.7GB 统一内存，切换语言会先释放上一套），停止录制 5 分钟后自动全部释放，下次点 Start 再从磁盘缓存加载（几秒）。时长用 `livecaption-web --idle-unload 分钟数` 调整，`0` 为不释放。
 
+语言预设里的 **English (accurate) → 中文** 用 Qwen3-ASR 转写英文：实测错误率明显更低（母语者朗读 5.4%→3.7%，中国口音的口语英文 26.2%→17.0%，见 `scripts/eval_asr.py`），代价是实时字幕约每 2 秒刷新一次（默认的 English 是逐词刷新）、一句话只标一个说话人、内存多约 1.2GB。和中文/中英混合预设共用同一个模型，互相切换不用重新加载。
+
 命令行手动安装：
 
 ```bash

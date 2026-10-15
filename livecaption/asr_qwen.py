@@ -229,6 +229,12 @@ class QwenRecognizer:
                     self.aligner.align(silence, "hello", self.language or "English")
         mx.clear_cache()
 
+    def set_language(self, language: str) -> None:
+        """Switch the spoken language for streams created from now on. For Qwen3-ASR the
+        language is only a decode-time prompt, so presets that differ in nothing else share
+        one loaded model instead of reloading the same weights."""
+        self.language = _resolve_qwen_language(language)
+
     def create_stream(self) -> QwenOnlineStream:
         return QwenOnlineStream(self)
 

@@ -63,10 +63,16 @@ _MEETINGS_DIR = Path.home() / ".cache" / "livecaption" / "meetings"
 # direction. English uses the low-latency streaming nemotron; Chinese and mixed Chinese/English
 # use qwen3 (strong Chinese + native code-switching). Translation direction is the sensible
 # "other language" default and is trivially changed here (same MT model, different target).
+# "en-qwen" transcribes English with qwen3 too: markedly fewer errors (scripts/eval_asr.py:
+# LibriSpeech 5.4% -> 3.7%, Chinese-accented conversational English from CAiRE/ASCEND
+# 26.2% -> 17.0% mixed error rate) at the cost of nemotron's word-by-word live line (qwen3
+# refreshes it every ~2 s), its mid-sentence speaker splits (one speaker per sentence) and
+# ~1.2 GB more memory. The qwen3 presets share one loaded model (only the language differs).
 LANG_PRESETS = {
-    "en":    {"label": "English → 中文",  "asr_model": "nemotron-0.6b",   "asr_lang": "en-us", "target": "zh-cn"},  # noqa: E501
-    "zh":    {"label": "中文 → English",  "asr_model": "qwen3-1.7b-8bit", "asr_lang": "zh",    "target": "en"},     # noqa: E501
-    "mixed": {"label": "中英混合 → 中文", "asr_model": "qwen3-1.7b-8bit", "asr_lang": "zh",    "target": "zh-cn"},  # noqa: E501
+    "en":      {"label": "English → 中文",            "asr_model": "nemotron-0.6b",   "asr_lang": "en-us", "target": "zh-cn"},  # noqa: E501
+    "en-qwen": {"label": "English (accurate) → 中文", "asr_model": "qwen3-1.7b-8bit", "asr_lang": "en",    "target": "zh-cn"},  # noqa: E501
+    "zh":      {"label": "中文 → English",            "asr_model": "qwen3-1.7b-8bit", "asr_lang": "zh",    "target": "en"},     # noqa: E501
+    "mixed":   {"label": "中英混合 → 中文",           "asr_model": "qwen3-1.7b-8bit", "asr_lang": "zh",    "target": "zh-cn"},  # noqa: E501
 }
 
 
@@ -233,11 +239,16 @@ class Session:
                 self.sink.log("warn", f"Could not download {repo}: {e}")
 
     def _get_recognizer(self, preset: dict) -> object:
+        qwen = preset["backend"] == "qwen3"
         key = "|".join([
-            preset["backend"], preset["asr_model_id"], preset["asr_lang"],
+            # qwen3's language is a decode-time prompt (set_language below), not part of the
+            # loaded bundle: presets differing only in it share one model
+            preset["backend"], preset["asr_model_id"], "" if qwen else preset["asr_lang"],
             str(self._diarize), str(preset["word_diarize"]),
         ])
         if self._recognizer is not None and self._recognizer_key == key:
+            if qwen:
+                self._recognizer.set_language(preset["asr_lang"])
             return self._recognizer
         # a different preset: free the previous bundle BEFORE loading the next one, so the
         # two never sit in memory together
