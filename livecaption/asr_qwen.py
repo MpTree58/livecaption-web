@@ -78,6 +78,17 @@ def _resolve_qwen_language(language: str | None) -> str | None:
     return language.strip().title()
 
 
+def _tail_refine() -> bool:
+    """Whether finish_streaming may run its "accuracy" tail refine. It kicks in when the last
+    chunk's decode adds no text (e.g. an utterance's trailing silence) and re-decodes that
+    window through the package's module-level transcribe(model=<loaded object>), which --
+    like the old two-pass did -- takes its tokenizer from the package default
+    Qwen/Qwen3-ASR-0.6B (snapshot_download of that whole 1.8 GB repo, inside MLX_LOCK) and
+    decodes without the forced language. The two-pass re-decodes the whole utterance anyway,
+    so the refine only runs without it."""
+    return not config.QWEN_TWO_PASS
+
+
 def _word_offsets(words: list[dict], text: str) -> list[tuple[int, int]]:
     """Locate each aligned word in `text`, returning its (start, end) character offsets.
 
@@ -208,6 +219,7 @@ class QwenRecognizer:
                 max_context_sec=config.QWEN_MAX_CONTEXT_SEC,
                 language=self.language,
                 finalization_mode=config.QWEN_FINALIZATION_MODE,
+                enable_tail_refine=_tail_refine(),
             )
             state.forced_language = self.language
             state = feed_audio(silence, state, model=self.model_obj)
@@ -405,6 +417,7 @@ class QwenOnlineStream:
             max_context_sec=config.QWEN_MAX_CONTEXT_SEC,
             language=self._rec.language,
             finalization_mode=config.QWEN_FINALIZATION_MODE,
+            enable_tail_refine=_tail_refine(),
         )
         state.forced_language = self._rec.language
         return state
