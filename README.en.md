@@ -36,6 +36,8 @@ Always running doesn't mean always holding memory: the web UI keeps only the cur
 
 The **English (accurate) → 中文** preset transcribes English with Qwen3-ASR: measurably fewer errors (native read speech 5.4% → 3.7%, Chinese-accented conversational English 26.2% → 17.0%, see `scripts/eval_asr.py`), at the cost of a live line that refreshes about every 2 s (the default English preset updates word by word), one speaker label per sentence, and ~1.2 GB more memory. It shares one model with the Chinese / mixed presets, so switching between them doesn't reload.
 
+**Glossary** (the web UI's Glossary button; `--glossary FILE` on the CLI): one name / product / jargon term per line, e.g. `Flander`, `MPPS`; `联调 = integration testing` pins a translation (used in either direction). Recognition uses it with the Qwen3 presets only (Chinese, mixed, English (accurate)): the final re-decode is biased toward the terms, which turned "和 Flender 再连调" into "和 Flander 再联调" and "MPTS … Superbase" into "MPPS … Supabase" in testing. Translation uses it with every preset: a sentence containing terms is translated with Hy-MT2's official terminology template, and English names are kept as is by default ("Andy" isn't rendered as "安迪"). Saving applies it from the next sentence, also mid-recording.
+
 Manual command-line install:
 
 ```bash
@@ -68,6 +70,9 @@ uv run --extra qwen livecaption --source file --file podcast.mp3 --out podcast.m
 
 # Translation includes the previous 3 sentences of context by default (improves pronoun reference / terminology consistency); to disable or adjust:
 uv run livecaption --source system --context 0
+
+# Glossary: names, products, jargon (one per line; `term = translation` pins a translation, see "Glossary" below)
+uv run --extra qwen livecaption --asr-model qwen3-1.7b-8bit --asr-lang Chinese --glossary terms.txt
 
 # Transcribe only, no translation
 uv run livecaption --source mic --no-translate

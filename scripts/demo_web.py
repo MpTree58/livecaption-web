@@ -4,8 +4,9 @@ Runs livecaption.webapp unchanged except for its inputs: the microphone ("me") p
 and system audio ("them") plays --them FILE (default: MIC_FILE), both paced to real time and
 looped with a short pause, so the page can be exercised end to end -- partials, finals,
 diarization, translation, meeting records -- without speaking, granting mic / system-audio
-permission, or building audiotee. Meetings go to a throwaway directory unless --meetings DIR
-is given, never ~/.cache/livecaption. Other options are passed through to the web app.
+permission, or building audiotee. Meetings (and the glossary) go to a throwaway directory
+unless --meetings DIR is given, never ~/.cache/livecaption. Other options are passed through
+to the web app.
     uv run --extra qwen python scripts/demo_web.py speech.wav --port 8765 --no-open
     uv run --extra qwen python scripts/demo_web.py en.wav --them zh.wav --meetings /tmp/m
 """
@@ -76,6 +77,7 @@ if __name__ == "__main__":
     webapp.SystemAudioSource = LiveSystemSource  # a class: webapp also isinstance()-checks it
     webapp.resolve_audiotee = lambda _explicit: "audiotee (demo: not used)"
     webapp._MEETINGS_DIR = Path(meetings)
+    webapp._GLOSSARY_FILE = Path(meetings) / "glossary.txt"  # the store only lists directories
     print(f"demo: mic <- {mic_file}\ndemo: system <- {them_file}\ndemo: meetings -> {meetings}")
 
     sys.argv = [sys.argv[0], *args]

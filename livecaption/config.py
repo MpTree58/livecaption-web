@@ -192,6 +192,22 @@ TRANSLATE_PROMPT_WITH_CONTEXT_ZH = (
     "请结合背景信息将以下文本翻译为{target_lang}。\n\n"
     "【待翻译文本】\n{text}"
 )
+# Terminology template (README "Terminology", both versions verbatim), for a sentence that
+# contains glossary terms (glossary.py): {terms} is one TERM_LINE per pair. There is no
+# official template combining terms with background, so such a sentence goes without it.
+TRANSLATE_PROMPT_TERMS = (
+    "Reference the following translations:\n{terms}\n\n"
+    "Translate the following text into {target_lang}. "
+    "Note that you must ONLY output the translated result "
+    "without any additional explanation:\n\n{text}"
+)
+TERM_LINE = "{source} translates to {target}"
+TRANSLATE_PROMPT_TERMS_ZH = (
+    "参考下面的翻译：\n{terms}\n"
+    "将以下文本翻译为{target_lang}，"
+    "注意只需要输出翻译后的结果，不要额外解释：\n\n{text}"
+)
+TERM_LINE_ZH = "{source} 翻译成 {target}"
 MT_TEMPERATURE = 0.7
 MT_TOP_P = 0.6
 MT_TOP_K = 20

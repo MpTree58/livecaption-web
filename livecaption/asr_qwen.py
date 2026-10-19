@@ -160,6 +160,8 @@ class QwenRecognizer:
         say = log or (lambda _m: None)
         self.model_id = asr_model
         self.language = _resolve_qwen_language(language)
+        # glossary biasing: space-separated terms in Qwen3-ASR's system prompt (set_context)
+        self.context = ""
         say(f"Loading ASR model {asr_model} (Qwen3-ASR via mlx-qwen3-asr) …")
         # load_model -> (model, config); keep the model object to pass into feed/finish so
         # the decoder never reloads weights between utterances.
@@ -234,6 +236,13 @@ class QwenRecognizer:
         language is only a decode-time prompt, so presets that differ in nothing else share
         one loaded model instead of reloading the same weights."""
         self.language = _resolve_qwen_language(language)
+
+    def set_context(self, context: str) -> None:
+        """Bias the final (two-pass) decode toward these space-separated terms
+        (glossary.asr_context) -- the package's documented `context` input, the decode's system
+        prompt. Takes effect from the next utterance; "" turns it off. Partials stay unbiased
+        (see QwenOnlineStream._new_state), and without two-pass there is nothing to bias."""
+        self.context = context
 
     def create_stream(self) -> QwenOnlineStream:
         return QwenOnlineStream(self)
@@ -386,6 +395,10 @@ class QwenOnlineStream:
     # ---- decode ----
 
     def _new_state(self):
+        # No glossary context here: the rolling streaming decode recites it -- a live line
+        # read "我们下午和 Flander Andy MPPS Supabase PRD 联调 integration testing 工单 ticket。"
+        # with the glossary as context (the offline re-decode doesn't). The final's two-pass
+        # re-decode applies it instead (_second_pass), so corrections show up as its diff.
         state = self._init_streaming(
             model=self._rec.model_id,
             chunk_size_sec=config.QWEN_CHUNK_SIZE_SEC,
@@ -563,11 +576,14 @@ class QwenOnlineStream:
                     result = self._transcribe(
                         audio,
                         language=self._rec.language,
+                        context=self._rec.context,
                         return_timestamps=True,
                         forced_aligner=self._aligner,
                     )
                 else:
-                    result = self._transcribe(audio, language=self._rec.language)
+                    result = self._transcribe(
+                        audio, language=self._rec.language, context=self._rec.context
+                    )
             text = (result.text or "").strip()
             words = getattr(result, "segments", None) if want_words else None
             return text, words

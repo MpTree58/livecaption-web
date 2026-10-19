@@ -19,6 +19,7 @@ bash scripts/build_audiotee.sh               # 编译系统音频捕获二进制
 uv run python scripts/smoke_asr.py           # ASR 端到端：加载模型 + 解码自带 test wav，对照离线结果
 uv run python scripts/smoke_translate.py     # 翻译端到端
 uv run python scripts/smoke_diff.py          # _inline_diff 纯逻辑测试（无模型，秒级）
+uv run python scripts/smoke_glossary.py      # 术语表解析 / 词条方向纯逻辑测试（无模型，秒级）
 uv run python scripts/smoke_mel.py           # 增量 mel 与整句一次性计算的一致性（改 _mel_grow 后必跑）
 uv run python scripts/diag_system_audio.py   # 系统音频 / 权限自检（播放声音看能否捕获到非零数据）
 uv run --extra qwen python scripts/smoke_model_swap.py  # 网页端切换语言预设后旧模型是否释放（真模型 + say 合成音频冒充麦克风，临时会议库）
@@ -40,6 +41,7 @@ AudioSource(后台)  ──queue──▶  AsrWorker(线程)  ──final 句─
 - **`audio.py`** — `MicSource`(sounddevice 回调)、`SystemAudioSource`(读 audiotee 子进程 stdout)、`FileSource`(解码音频文件)，统一把 16k float32 mono chunk 放进 `self.queue`，流结束放 `SENTINEL`。实时源绝不阻塞（队列满了丢帧）；**FileSource 例外：阻塞 put 不丢帧**（无实时性约束，端点检测数 VAD 帧不依赖墙钟）。`SystemAudioSource` 有 supervisor 线程做断流看门狗：健康的 tap 静音时也持续输出零字节流，**完全无数据 ≥5s（`SYSTEM_AUDIO_STALL_SEC`）= tap 已死**（实测诱因：切换默认输出设备，音频在新设备继续播、tap 还挂在旧设备上 IO 停转），此时杀掉重启 audiotee 重新 tap 当前设备，字幕自动恢复——曾因纯阻塞 read 静默饿死整条流水线且无任何提示。
 - **`asr.py`** — `Recognizer`(共享权重) + `OnlineStream`(单流状态机：Silero VAD 判开口/静音，push 式增量 encoder + RNNT 解码) + `AsrWorker`(消费队列、把事件转回调)。发两种事件：`on_partial`(中间结果，随说话变) 和 `on_final`(端点后定稿)。diarize（默认开）时一句可能切成多个 final（每说话人一段），label 带 `#S1` 后缀。
 - **`translate.py`** — `Translator` 后台加载 Hy-MT2，**只翻译 final 句**。翻译堵塞绝不反压音频（积压 ≥10 句时向 stderr 告警一次）。`context_size>0` 时用最近 N 句原文做翻译背景。生成用 `stream_generate` 手动驱动、每个 decode step 取一次 `runtime.MLX_LOCK`。模型加载失败会打印 "translation disabled" 并退出线程，转录照常。输出侧有三道防护（都不改官方 prompt 模版）：(1) 源句 < `MT_CONTEXT_MIN_WORDS` 词时不带上下文（碎片输入易让模型转去翻背景块）；(2) `_strip_boilerplate` 剥掉 "根据背景信息，以下是译文：" 这类元文本前缀；(3) 上下文回声检测（译文与上一句译文的字符 bigram 重合 ≥45% = 模型翻了背景而非原文，实测阈值能区分劫持与同话题相邻句），命中则去掉上下文重翻一次。
+- **`glossary.py`** — 术语表（每行 `术语` 或 `术语 = 译法`）。识别端：`asr_context` 拼成空格分隔的词串给 qwen3 的 `context`（nemotron 无此能力）；**只用于定稿的 two-pass 整句重解，流式会话不能带**——mlx-qwen3-asr 的滚动流式解码带 context 时会把整份术语表"念"进 partial（实测），离线整句解码不会。翻译端：`translation_pairs` 按句挑出出现的词条、按目标语言定方向（同一词条中↔英两用；拉丁字母术语译成中文时默认原样保留），命中的句子改用 README 官方术语模板（`TRANSLATE_PROMPT_TERMS*`，官方没有术语+背景的组合模板，所以这类句子不带上下文）。网页端存 `~/.cache/livecaption/glossary.txt`，保存即对进行中的录音生效（下一句起）。
 - **`runtime.py`** — 进程级 `MLX_LOCK`（中立归属，asr 和 translate 都 import 它，谁也不依赖谁）。
 - **`render.py`** — `Renderer`(rich.Live 终端，底部活动区刷 partial、上方滚动 final) + `FileWriter`(追加写文件)。配色按 `--theme`(auto/light/dark) 分三套：单套固定色总会在某种背景下隐身，所以**只有译文真正随背景变**(default=默认前景+加粗"不赌颜色"，dark=亮青，light=深青蓝)，其余元素用对两种背景都中性可见的固定样式(grey50 中灰、说话人调色板)——**一律不用 `dim`**(dim 相对背景降亮度，两种背景都偏淡，正是用户反馈"看不清"的根因)。说话人 S1–S4 各一色(`_SPEAKER_PALETTE`，按主题分套且刻意避开青系以防与译文撞色、避开绿系以防与 diff 新词撞色；S1 品红/S2 蓝/S3 橙/S4 红跨主题保持同色相)。diff 配色：纠掉的词用中灰删除线（被取代的内容不该比正文显眼；红色曾与 S4 标签混淆），新词绿色。auto 从 `COLORFGBG` 末段探测背景，探测不到回退 default。
 - **`cli.py`** — 装配层：解析参数 → 建音频源 → 每个源一个 recognizer + AsrWorker → 回调接到 renderer/writer/translator → 等 Ctrl-C。

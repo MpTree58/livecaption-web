@@ -16,7 +16,7 @@ from pathlib import Path
 import typer
 from rich.console import Console
 
-from . import config
+from . import config, glossary
 from .asr import AsrWorker, build_recognizer
 from .audio import AudioSource, FileSource, MicSource, SystemAudioSource
 from .languages import normalize_target_language
@@ -139,6 +139,11 @@ def main(
         config.MT_CONTEXT_SENTENCES, rich_help_panel="Translation",
         help="Prior sentences passed as translation context (0=off; try 2-3)",
     ),
+    glossary_file: Path | None = typer.Option(
+        None, "--glossary", metavar="FILE", rich_help_panel="Translation",
+        help="Names / jargon, one per line ('term' or 'term = translation'): biases qwen3 "
+        "recognition and fixes how the terms are translated",
+    ),
     # --- Output & display ---
     out: Path | None = typer.Option(
         None, "--out", "-o", rich_help_panel="Output & display",
@@ -174,6 +179,13 @@ def main(
         except ValueError as e:
             console.print(f"[red]{e}[/red]")
             raise typer.Exit(1) from None
+
+    terms: list[glossary.Entry] = []
+    if glossary_file is not None:
+        if not glossary_file.exists():
+            console.print(f"[red]--glossary file not found: {glossary_file}[/red]")
+            raise typer.Exit(1)
+        terms = glossary.parse(glossary_file.read_text(encoding="utf-8"))
 
     # Resolve the chosen aliases to (engine, model id); the engine drives the ASR branch below.
     backend_name, asr_model_id = config.ASR_MODELS[asr_model.value]
@@ -239,6 +251,7 @@ def main(
                 asr_model_id, asr_lang, diarize, diarize and word_diarize,
                 log=lambda m: console.print(f"[dim]{m}[/dim]"),
             )
+            recognizer.set_context(glossary.asr_context(terms))
         else:
             recognizer = build_recognizer(
                 asr_model_id, asr_lang, diarize,
@@ -307,6 +320,7 @@ def main(
                 on_preview=handle_preview,
                 context_size=context,
             )
+            translator.set_glossary(terms)
             console.print(f"[dim]Loading translation model {mt_model_id} …[/dim]")
             translator.start()
 

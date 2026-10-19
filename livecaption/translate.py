@@ -22,6 +22,7 @@ from collections.abc import Callable
 from datetime import datetime
 
 from . import config
+from .glossary import Entry, translation_pairs
 from .languages import normalize_target_language
 from .runtime import MLX_LOCK
 
@@ -127,6 +128,13 @@ class Translator(threading.Thread):
         # previous finalized segment's translation, for context-echo detection (previews
         # are provisional and don't update it)
         self._last_zh = ""
+        # glossary entries (glossary.py); only touched on the translator thread, set through
+        # the queue by set_glossary
+        self._glossary: list[Entry] = []
+
+    def set_glossary(self, entries: list[Entry]) -> None:
+        """Use these glossary entries from the next sentence on (queued like reset_context)."""
+        self._queue.put(("glossary", list(entries)))
 
     def submit(self, label: str, segments: list, started_at: datetime) -> None:
         # segments = [(speaker, text, diff), ...]; each speaker segment is translated separately
@@ -196,14 +204,17 @@ class Translator(threading.Thread):
         # Join with spaces rather than newlines: the "sentences" cut by endpointing are
         # often fragments of a continuous speech stream, and space-joining stays closer
         # to the original continuous text, which works better as background.
+        # A sentence containing glossary terms is translated with the terminology template
+        # instead (no official template combines terms with background).
+        terms = translation_pairs(self._glossary, text, self.target_lang in _ZH_TARGET_NAMES)
         context = ""
-        if self._history and len(text.split()) >= config.MT_CONTEXT_MIN_WORDS:
+        if self._history and not terms and len(text.split()) >= config.MT_CONTEXT_MIN_WORDS:
             context = " ".join(self._history)
         if record and self._history is not None:
             # add the current sentence to history as context for later sentences (previews are
             # provisional, so they don't pollute the context)
             self._history.append(text)
-        zh = _strip_boilerplate(self._generate(text, context))
+        zh = _strip_boilerplate(self._generate(text, context, terms))
         if context and self._looks_like_context_echo(zh):
             # Known failure of the background template on noisy input: the model translates
             # the background block instead of the source, so the output largely reproduces
@@ -226,19 +237,24 @@ class Translator(threading.Thread):
         zh_bi = {zh[i : i + 2] for i in range(len(zh) - 1)}
         return len(prev_bi & zh_bi) >= 0.45 * len(prev_bi)
 
-    def _generate(self, text: str, context: str) -> str:
+    def _generate(self, text: str, context: str, terms: list | None = None) -> str:
         from mlx_lm import stream_generate
 
         # into Chinese, the README's Chinese templates (with the Chinese language name) translate
         # better than the English ones; into any other language the English ones -- see config
         zh_name = _ZH_TARGET_NAMES.get(self.target_lang)
-        if context:
+        if terms:
+            template = (config.TRANSLATE_PROMPT_TERMS_ZH if zh_name
+                        else config.TRANSLATE_PROMPT_TERMS)
+            line = config.TERM_LINE_ZH if zh_name else config.TERM_LINE
+            terms_block = "\n".join(line.format(source=s, target=t) for s, t in terms)
+        elif context:
             template = (config.TRANSLATE_PROMPT_WITH_CONTEXT_ZH if zh_name
                         else config.TRANSLATE_PROMPT_WITH_CONTEXT)
         else:
             template = config.TRANSLATE_PROMPT_ZH if zh_name else config.TRANSLATE_PROMPT
         content = template.format(context=context, target_lang=zh_name or self.target_lang,
-                                  text=text)
+                                  text=text, terms=terms_block if terms else "")
         messages = [{"role": "user", "content": content}]
         # mlx-lm defaults to tokenize=True and returns token ids; matches the official README usage
         prompt = self._tokenizer.apply_chat_template(
@@ -295,6 +311,9 @@ class Translator(threading.Thread):
                 if self._history is not None:
                     self._history.clear()
                 self._last_zh = ""
+                continue
+            if item[0] == "glossary":  # see set_glossary
+                self._glossary = item[1]
                 continue
             if item[0] == "preview":
                 _, label, segments, started_at, seq = item

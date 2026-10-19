@@ -37,7 +37,7 @@ from huggingface_hub import constants as hf_constants
 from huggingface_hub.constants import HF_HUB_CACHE, HF_XET_CACHE
 from rich.console import Console
 
-from . import config
+from . import config, glossary
 from .asr import AsrWorker, build_recognizer
 from .audio import AudioSource, MicSource, SystemAudioSource
 from .languages import normalize_target_language
@@ -58,6 +58,7 @@ hf_constants.HF_HUB_DISABLE_XET = True
 
 _WEBUI = Path(__file__).with_name("webui.html")
 _MEETINGS_DIR = Path.home() / ".cache" / "livecaption" / "meetings"
+_GLOSSARY_FILE = Path.home() / ".cache" / "livecaption" / "glossary.txt"  # see glossary.py
 
 # Language presets offered in the web UI. Each = a spoken-language ASR engine + a translation
 # direction. English uses the low-latency streaming nemotron; Chinese and mixed Chinese/English
@@ -104,6 +105,7 @@ class Session:
         sync_url: str = "",
         sync_token: str = "",
         idle_unload_min: float = config.WEB_IDLE_UNLOAD_MIN,
+        glossary_path: Path | None = None,
     ) -> None:
         self.sink = sink
         self.store = store
@@ -117,6 +119,13 @@ class Session:
         # optional central-server sync: push each finished meeting to a shared library
         self._sync_url = sync_url.rstrip("/")
         self._sync_token = sync_token
+        # names / jargon for recognition and translation, edited in the page (glossary.py);
+        # None = not persisted (tests)
+        self._glossary_path = glossary_path
+        self._glossary_text = ""
+        if glossary_path is not None and glossary_path.exists():
+            self._glossary_text = glossary_path.read_text(encoding="utf-8")
+        self._glossary = glossary.parse(self._glossary_text)
 
         # warm models, reused across start/stop: the current preset's recognizer (with the
         # config key it was built for) and the one translator shared by every preset
@@ -360,6 +369,7 @@ class Session:
                 # fresh meeting: don't inherit the previous session's rolling context, and
                 # translate in this preset's direction
                 translator.reset_context(preset["target_prompt"])
+            self._apply_glossary()
             self._preview_words.clear()
 
             def handle_partial(
@@ -531,6 +541,30 @@ class Session:
             return False  # refuse to delete the meeting currently being recorded
         return self.store.delete(mid)
 
+    # --- glossary: names / jargon for recognition and translation (glossary.py) ---
+    def glossary(self) -> dict:
+        return {"text": self._glossary_text, "terms": len(self._glossary)}
+
+    def set_glossary(self, text: str) -> dict:
+        """Save the page's glossary and use it right away: a recording in progress picks it up
+        from its next sentence (qwen3 recognition, and translation)."""
+        self._glossary_text = text
+        self._glossary = glossary.parse(text)
+        if self._glossary_path is not None:
+            self._glossary_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            tmp = self._glossary_path.with_suffix(".tmp")
+            tmp.write_text(text, encoding="utf-8")
+            os.replace(tmp, self._glossary_path)
+        self._apply_glossary()
+        return {"ok": True, "terms": len(self._glossary)}
+
+    def _apply_glossary(self) -> None:
+        rec, tr = self._recognizer, self._translator
+        if hasattr(rec, "set_context"):  # qwen3 only: nemotron has no biasing input
+            rec.set_context(glossary.asr_context(self._glossary))
+        if tr is not None:
+            tr.set_glossary(self._glossary)
+
     def shutdown(self) -> None:
         """Server exit: finish the run (if any) and tear down the warm translator thread."""
         with self._op_lock:
@@ -623,6 +657,8 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_json(self._session.state())
         elif path == "/meetings":
             self._send_json({"meetings": self._store.list()})
+        elif path == "/glossary":
+            self._send_json(self._session.glossary())
         elif path == "/search":
             from urllib.parse import parse_qs, urlparse
 
@@ -645,6 +681,8 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_json(self._session.start(body.get("source", "both"), body.get("lang")))
         elif path == "/stop":
             self._send_json(self._session.stop())
+        elif path == "/glossary":
+            self._send_json(self._session.set_glossary(str(body.get("text", ""))))
         elif path.startswith("/meetings/") and path.endswith("/rename"):
             ok = self._session.rename_meeting(path.split("/")[2], body.get("title", ""))
             self._send_json({"ok": ok}, 200 if ok else 404)
@@ -904,6 +942,7 @@ def main(
         sync_url=sync_url,
         sync_token=sync_token,
         idle_unload_min=idle_unload,
+        glossary_path=_GLOSSARY_FILE,
     )
 
     # surface the deep-in-the-stack system-audio silence warning to the browser banner

@@ -70,6 +70,16 @@
   #progress { display: none; padding: 8px 16px; background: var(--panel); color: var(--muted); border-bottom: 1px solid var(--border); font-size: 13px; }
   #progress .bar { height: 4px; background: var(--panel2); border: 1px solid var(--border); border-radius: 3px; margin-top: 6px; overflow: hidden; }
   #progress .bar i { display: block; height: 100%; width: 0%; background: var(--accent); transition: width .6s; }
+  #glossarybtn { background: none; border: 1px solid var(--border); border-radius: 8px; color: var(--fg); font: inherit; font-size: 13px; padding: 5px 10px; cursor: pointer; }
+  #glossarybtn[aria-expanded="true"] { background: var(--sel); }
+  #glossary { padding: 10px 16px 12px; background: var(--panel); border-bottom: 1px solid var(--border); font-size: 13px; }
+  #glossary[hidden] { display: none; }
+  #glossary .ghead { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 6px; }
+  #glossary .ghead span { color: var(--muted); }
+  #glossarytext { width: 100%; min-height: 96px; height: 120px; resize: vertical; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); color: var(--fg); font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; padding: 8px 10px; }
+  #glossary .gfoot { display: flex; gap: 12px; align-items: flex-start; margin-top: 6px; color: var(--muted); }
+  #glossary .gfoot span { flex: 1; }
+  #glossarysave { border: 0; border-radius: 8px; background: var(--accent); color: #fff; font: inherit; font-weight: 600; padding: 6px 14px; cursor: pointer; }
 
   #body { flex: 1; display: flex; min-height: 0; }
   /* --- sidebar --- */
@@ -165,6 +175,7 @@
   <button id="toggle">Start</button>
   <div id="status" aria-live="polite"><span class="led"></span><span id="statustext">Ready</span></div>
   <div class="spacer"></div>
+  <button id="glossarybtn" aria-expanded="false" aria-controls="glossary" title="Names and jargon the models should get right">Glossary</button>
   <label class="chk"><input type="checkbox" id="diffchk" checked> diff</label>
   <label class="chk"><input type="checkbox" id="autochk" checked> auto-scroll</label>
 </header>
@@ -172,6 +183,15 @@
 <div id="progress">
   <span id="progresstext"></span>
   <div class="bar"><i id="progressfill"></i></div>
+</div>
+<div id="glossary" hidden>
+  <div class="ghead"><b>Glossary</b><span id="glossarystatus"></span></div>
+  <textarea id="glossarytext" spellcheck="false" aria-label="Glossary, one entry per line"
+    placeholder="Flander&#10;MPPS&#10;联调 = integration testing"></textarea>
+  <div class="gfoot">
+    <span>One name or term per line. Add “= translation” to fix how it is translated (either direction). Recognition uses the terms with the Qwen3 presets (Chinese, mixed, English accurate); translation uses them with every preset. Takes effect from the next sentence.</span>
+    <button id="glossarysave">Save</button>
+  </div>
 </div>
 
 <div id="body">
@@ -719,6 +739,39 @@
     bannerTimer = level !== "warn" ? setTimeout(hideBanner, 6000) : null;
   }
   $("#bannerclose").addEventListener("click", hideBanner);
+
+  // --- glossary: names / jargon for recognition and translation (stored by the engine) ---
+  const glossaryBtn = $("#glossarybtn"), glossaryEl = $("#glossary");
+  const glossaryText = $("#glossarytext"), glossaryStatus = $("#glossarystatus");
+  let glossarySaved = "";
+  const termsLabel = (n) => n + (n === 1 ? " term" : " terms");
+  async function openGlossary(open) {
+    glossaryEl.hidden = !open; glossaryBtn.setAttribute("aria-expanded", String(open));
+    if (!open) return;
+    const r = await api.get("/glossary");
+    if (r.error) { glossaryStatus.textContent = "couldn't load: " + r.error; return; }
+    glossaryText.value = glossarySaved = r.text || "";
+    glossaryStatus.textContent = termsLabel(r.terms || 0);
+    glossaryText.focus();
+  }
+  async function saveGlossary() {
+    const text = glossaryText.value;
+    glossaryStatus.textContent = "saving…";
+    const r = await api.post("/glossary", { text });
+    if (!r.ok) { glossaryStatus.textContent = "not saved: " + (r.error || "error"); return; }
+    glossarySaved = text;
+    glossaryStatus.textContent = "saved · " + termsLabel(r.terms)
+      + (st.phase === "listening" ? " · in use from the next sentence" : "");
+  }
+  glossaryBtn.addEventListener("click", () => openGlossary(glossaryEl.hidden));
+  $("#glossarysave").addEventListener("click", saveGlossary);
+  glossaryText.addEventListener("input", () => {
+    if (glossaryText.value !== glossarySaved) glossaryStatus.textContent = "unsaved changes";
+  });
+  glossaryText.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); saveGlossary(); }
+    else if (e.key === "Escape") { openGlossary(false); glossaryBtn.focus(); }
+  });
 
   // --- per-browser preferences (best effort: storage may be unavailable, e.g. private mode) ---
   const prefs = {
