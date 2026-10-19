@@ -16,13 +16,13 @@ from pathlib import Path
 import typer
 from rich.console import Console
 
-from . import config
+from . import config, glossary
 from .asr import AsrWorker, build_recognizer
 from .audio import AudioSource, FileSource, MicSource, SystemAudioSource
 from .languages import normalize_target_language
 from .models import resolve_audiotee
 from .render import FileWriter, Renderer
-from .translate import Translator
+from .translate import Translator, preview_due
 
 # Turn off huggingface_hub download progress bars (they spam the screen even when the model is
 # already cached); download failures still raise. hub is lazily imported when each model loads,
@@ -139,6 +139,11 @@ def main(
         config.MT_CONTEXT_SENTENCES, rich_help_panel="Translation",
         help="Prior sentences passed as translation context (0=off; try 2-3)",
     ),
+    glossary_file: Path | None = typer.Option(
+        None, "--glossary", metavar="FILE", rich_help_panel="Translation",
+        help="Names / jargon, one per line ('term' or 'term = translation'): biases qwen3 "
+        "recognition and fixes how the terms are translated",
+    ),
     # --- Output & display ---
     out: Path | None = typer.Option(
         None, "--out", "-o", rich_help_panel="Output & display",
@@ -174,6 +179,13 @@ def main(
         except ValueError as e:
             console.print(f"[red]{e}[/red]")
             raise typer.Exit(1) from None
+
+    terms: list[glossary.Entry] = []
+    if glossary_file is not None:
+        if not glossary_file.exists():
+            console.print(f"[red]--glossary file not found: {glossary_file}[/red]")
+            raise typer.Exit(1)
+        terms = glossary.parse(glossary_file.read_text(encoding="utf-8"))
 
     # Resolve the chosen aliases to (engine, model id); the engine drives the ASR branch below.
     backend_name, asr_model_id = config.ASR_MODELS[asr_model.value]
@@ -239,6 +251,7 @@ def main(
                 asr_model_id, asr_lang, diarize, diarize and word_diarize,
                 log=lambda m: console.print(f"[dim]{m}[/dim]"),
             )
+            recognizer.set_context(glossary.asr_context(terms))
         else:
             recognizer = build_recognizer(
                 asr_model_id, asr_lang, diarize,
@@ -307,6 +320,7 @@ def main(
                 on_preview=handle_preview,
                 context_size=context,
             )
+            translator.set_glossary(terms)
             console.print(f"[dim]Loading translation model {mt_model_id} …[/dim]")
             translator.start()
 
@@ -321,11 +335,9 @@ def main(
             renderer.partial(label, text, started_at, speaker)
             # P2 live preview: retranslate the in-progress utterance once it has grown by
             # MT_PREVIEW_MIN_WORDS and contains a sentence-ender (debounced; latest-wins)
-            if translator and config.MT_PREVIEW_MIN_WORDS > 0:
-                nwords = len(text.split())
-                if nwords - preview_words.get(label, 0) >= config.MT_PREVIEW_MIN_WORDS and any(
-                    c in text for c in ".?!"
-                ):
+            if translator:
+                nwords = preview_due(text, preview_words.get(label, 0))
+                if nwords is not None:
                     preview_words[label] = nwords
                     translator.submit_preview(label, [(speaker, text, None)], started_at)
 

@@ -22,6 +22,7 @@ from collections.abc import Callable
 from datetime import datetime
 
 from . import config
+from .glossary import Entry, translation_pairs
 from .languages import normalize_target_language
 from .runtime import MLX_LOCK
 
@@ -45,6 +46,9 @@ _BOILERPLATE_RE = re.compile(
 )
 # quote pairs the model wraps the translation in after a meta lead-in
 _QUOTE_PAIRS = {"“": "”", '"': '"', "「": "」", "'": "'"}
+# Chinese prompts name the target language in Chinese (Hy-MT2 README: "Chinese names should be
+# used in Chinese prompts"); these are the prompt names languages.py produces for zh targets
+_ZH_TARGET_NAMES = {"Simplified Chinese": "简体中文", "Traditional Chinese": "繁体中文"}
 
 
 def _strip_boilerplate(zh: str) -> str:
@@ -60,6 +64,27 @@ def _strip_boilerplate(zh: str) -> str:
     if closing and len(out) >= 2 and out.endswith(closing):
         out = out[1:-1].strip()
     return out or zh.strip()  # if the model emitted ONLY boilerplate, keep the original
+
+
+# Live preview debounce (config.MT_PREVIEW_MIN_WORDS). Sentence enders include the full-width
+# forms qwen3 emits for Chinese; Latin words are counted as words, CJK characters (no spaces
+# between words) two to a word -- a whitespace split would leave a Chinese partial at ~1
+# "word" forever, so zh / mixed meetings never got a preview.
+_PREVIEW_ENDERS = ".?!。？！"
+_LATIN_WORD_RE = re.compile(r"[A-Za-z0-9]+(?:['’][A-Za-z]+)?")
+
+
+def preview_due(text: str, covered: int) -> int | None:
+    """Return the in-progress text's word count when a live preview is due -- it grew by
+    MT_PREVIEW_MIN_WORDS since the last preview (`covered` words) and holds a sentence end --
+    else None. The caller stores the count as the new `covered`."""
+    if config.MT_PREVIEW_MIN_WORDS <= 0:
+        return None
+    cjk = sum(1 for c in text if "一" <= c <= "鿿")
+    words = len(_LATIN_WORD_RE.findall(text)) + cjk // 2
+    if words - covered >= config.MT_PREVIEW_MIN_WORDS and any(c in _PREVIEW_ENDERS for c in text):
+        return words
+    return None
 
 
 class Translator(threading.Thread):
@@ -103,6 +128,13 @@ class Translator(threading.Thread):
         # previous finalized segment's translation, for context-echo detection (previews
         # are provisional and don't update it)
         self._last_zh = ""
+        # glossary entries (glossary.py); only touched on the translator thread, set through
+        # the queue by set_glossary
+        self._glossary: list[Entry] = []
+
+    def set_glossary(self, entries: list[Entry]) -> None:
+        """Use these glossary entries from the next sentence on (queued like reset_context)."""
+        self._queue.put(("glossary", list(entries)))
 
     def submit(self, label: str, segments: list, started_at: datetime) -> None:
         # segments = [(speaker, text, diff), ...]; each speaker segment is translated separately
@@ -119,13 +151,25 @@ class Translator(threading.Thread):
             self._preview_seq[label] = seq
         self._queue.put(("preview", label, segments, started_at, seq))
 
-    def reset_context(self) -> None:
-        """Clear the rolling translation context and echo-detection state. Used between web
-        sessions so a new meeting doesn't inherit the previous one's background sentences
-        (the translator thread is kept warm and reused across start/stop)."""
-        if self._history is not None:
-            self._history.clear()
-        self._last_zh = ""
+    def reset_context(self, target_lang: str | None = None) -> None:
+        """Start a fresh conversation: clear the rolling translation context and
+        echo-detection state, and optionally switch the target language. Used between web
+        sessions so a new meeting doesn't inherit the previous one's background sentences;
+        the web UI keeps ONE translator warm for every language preset (the target is only
+        a prompt parameter -- a second translator would load a second copy of the weights).
+        Queued rather than applied immediately, so any backlog submitted before it still
+        finishes in its own meeting's language and context."""
+        target = normalize_target_language(target_lang).prompt_name if target_lang else None
+        self._queue.put(("reset", target))
+
+    def drain(self, timeout: float) -> bool:
+        """Block until everything submitted so far has been processed. Returns False on
+        timeout, or right away when the thread is gone (its model failed to load)."""
+        if not self.is_alive():
+            return False
+        done = threading.Event()
+        self._queue.put(("barrier", done))
+        return done.wait(timeout)
 
     def stop(self) -> None:
         self._queue.put(None)
@@ -160,14 +204,17 @@ class Translator(threading.Thread):
         # Join with spaces rather than newlines: the "sentences" cut by endpointing are
         # often fragments of a continuous speech stream, and space-joining stays closer
         # to the original continuous text, which works better as background.
+        # A sentence containing glossary terms is translated with the terminology template
+        # instead (no official template combines terms with background).
+        terms = translation_pairs(self._glossary, text, self.target_lang in _ZH_TARGET_NAMES)
         context = ""
-        if self._history and len(text.split()) >= config.MT_CONTEXT_MIN_WORDS:
+        if self._history and not terms and len(text.split()) >= config.MT_CONTEXT_MIN_WORDS:
             context = " ".join(self._history)
         if record and self._history is not None:
             # add the current sentence to history as context for later sentences (previews are
             # provisional, so they don't pollute the context)
             self._history.append(text)
-        zh = _strip_boilerplate(self._generate(text, context))
+        zh = _strip_boilerplate(self._generate(text, context, terms))
         if context and self._looks_like_context_echo(zh):
             # Known failure of the background template on noisy input: the model translates
             # the background block instead of the source, so the output largely reproduces
@@ -190,17 +237,24 @@ class Translator(threading.Thread):
         zh_bi = {zh[i : i + 2] for i in range(len(zh) - 1)}
         return len(prev_bi & zh_bi) >= 0.45 * len(prev_bi)
 
-    def _generate(self, text: str, context: str) -> str:
+    def _generate(self, text: str, context: str, terms: list | None = None) -> str:
         from mlx_lm import stream_generate
 
-        if context:
-            content = config.TRANSLATE_PROMPT_WITH_CONTEXT.format(
-                context=context, target_lang=self.target_lang, text=text
-            )
+        # into Chinese, the README's Chinese templates (with the Chinese language name) translate
+        # better than the English ones; into any other language the English ones -- see config
+        zh_name = _ZH_TARGET_NAMES.get(self.target_lang)
+        if terms:
+            template = (config.TRANSLATE_PROMPT_TERMS_ZH if zh_name
+                        else config.TRANSLATE_PROMPT_TERMS)
+            line = config.TERM_LINE_ZH if zh_name else config.TERM_LINE
+            terms_block = "\n".join(line.format(source=s, target=t) for s, t in terms)
+        elif context:
+            template = (config.TRANSLATE_PROMPT_WITH_CONTEXT_ZH if zh_name
+                        else config.TRANSLATE_PROMPT_WITH_CONTEXT)
         else:
-            content = config.TRANSLATE_PROMPT.format(
-                target_lang=self.target_lang, text=text
-            )
+            template = config.TRANSLATE_PROMPT_ZH if zh_name else config.TRANSLATE_PROMPT
+        content = template.format(context=context, target_lang=zh_name or self.target_lang,
+                                  text=text, terms=terms_block if terms else "")
         messages = [{"role": "user", "content": content}]
         # mlx-lm defaults to tokenize=True and returns token ids; matches the official README usage
         prompt = self._tokenizer.apply_chat_template(
@@ -248,6 +302,19 @@ class Translator(threading.Thread):
             item = self._queue.get()
             if item is None:
                 break
+            if item[0] == "barrier":  # everything queued before it is done, see drain
+                item[1].set()
+                continue
+            if item[0] == "reset":  # applied in queue order, see reset_context
+                if item[1] is not None:
+                    self.target_lang = item[1]
+                if self._history is not None:
+                    self._history.clear()
+                self._last_zh = ""
+                continue
+            if item[0] == "glossary":  # see set_glossary
+                self._glossary = item[1]
+                continue
             if item[0] == "preview":
                 _, label, segments, started_at, seq = item
                 with self._preview_lock:  # skip if a newer preview / the final superseded it

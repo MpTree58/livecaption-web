@@ -15,6 +15,7 @@
     --t1: #5b9dff; --t2: #b98cff; --t3: #7d8cff; --t4: #98a6c8;
     --badge-me-bg: #3a2a12; --badge-me-fg: #ffbf6b;
     --badge-them-bg: #16294a; --badge-them-fg: #7fb0ff;
+    --hit: #6b5413; --hitfg: #ffeab0;
   }
   @media (prefers-color-scheme: light) {
     :root {
@@ -27,6 +28,7 @@
       --t1: #2f6fe0; --t2: #7a3fd0; --t3: #4351c8; --t4: #56627a;
       --badge-me-bg: #fdeccf; --badge-me-fg: #8a5a00;
       --badge-them-bg: #dfe9ff; --badge-them-fg: #2551a0;
+      --hit: #ffe58a; --hitfg: #1c2129;
     }
   }
   * { box-sizing: border-box; }
@@ -50,16 +52,34 @@
   #lang:disabled { opacity: .5; cursor: not-allowed; }
   #toggle { padding: 7px 18px; border: 0; border-radius: 8px; font: inherit; font-weight: 600; cursor: pointer; background: var(--add); color: #05230e; }
   #toggle.running { background: var(--m3); color: #fff; }
+  #toggle.cancel { background: var(--panel2); color: var(--fg); box-shadow: inset 0 0 0 1px var(--border); }
+  #toggle:disabled { opacity: .6; cursor: default; }
   #status { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: 13px; }
   #status .led { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); }
   #status.listening .led { background: var(--add); box-shadow: 0 0 6px var(--add); }
   #status.starting .led, #status.stopping .led { background: var(--warn); }
+  #status.offline { color: var(--m3); }
+  #status.offline .led { background: var(--m3); }
   .spacer { flex: 1; }
   label.chk { color: var(--muted); font-size: 13px; display: inline-flex; align-items: center; gap: 5px; cursor: pointer; }
-  #banner { display: none; padding: 8px 16px; background: var(--warnbg); color: var(--warn); border-bottom: 1px solid var(--border); font-size: 13px; }
+  #banner { display: none; align-items: center; gap: 12px; padding: 8px 16px; background: var(--warnbg); color: var(--warn); border-bottom: 1px solid var(--border); font-size: 13px; }
+  #banner.shown { display: flex; }
+  #bannertext { flex: 1; }
+  #bannerclose { background: none; border: 0; color: inherit; font-size: 17px; line-height: 1; padding: 0 2px; cursor: pointer; opacity: .7; }
+  #bannerclose:hover { opacity: 1; }
   #progress { display: none; padding: 8px 16px; background: var(--panel); color: var(--muted); border-bottom: 1px solid var(--border); font-size: 13px; }
   #progress .bar { height: 4px; background: var(--panel2); border: 1px solid var(--border); border-radius: 3px; margin-top: 6px; overflow: hidden; }
   #progress .bar i { display: block; height: 100%; width: 0%; background: var(--accent); transition: width .6s; }
+  #glossarybtn { background: none; border: 1px solid var(--border); border-radius: 8px; color: var(--fg); font: inherit; font-size: 13px; padding: 5px 10px; cursor: pointer; }
+  #glossarybtn[aria-expanded="true"] { background: var(--sel); }
+  #glossary { padding: 10px 16px 12px; background: var(--panel); border-bottom: 1px solid var(--border); font-size: 13px; }
+  #glossary[hidden] { display: none; }
+  #glossary .ghead { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 6px; }
+  #glossary .ghead span { color: var(--muted); }
+  #glossarytext { width: 100%; min-height: 96px; height: 120px; resize: vertical; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); color: var(--fg); font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; padding: 8px 10px; }
+  #glossary .gfoot { display: flex; gap: 12px; align-items: flex-start; margin-top: 6px; color: var(--muted); }
+  #glossary .gfoot span { flex: 1; }
+  #glossarysave { border: 0; border-radius: 8px; background: var(--accent); color: #fff; font: inherit; font-weight: 600; padding: 6px 14px; cursor: pointer; }
 
   #body { flex: 1; display: flex; min-height: 0; }
   /* --- sidebar --- */
@@ -69,14 +89,20 @@
   .mi { padding: 8px 10px; border-radius: 8px; cursor: pointer; margin-bottom: 2px; }
   .mi:hover { background: var(--border); }
   .mi.sel { background: var(--sel); }
+  .mi:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
   .mi .t { font-size: 13.5px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .mi .m { font-size: 11.5px; color: var(--muted); display: flex; align-items: center; gap: 6px; margin-top: 1px; }
-  .mi .rec { color: var(--m3); font-weight: 700; }
+  /* items wrap between fields, never inside one (a squeezed "● REC" row broke every field in two) */
+  .mi .m { font-size: 11.5px; color: var(--muted); display: flex; flex-wrap: wrap; align-items: center; column-gap: 6px; margin-top: 1px; }
+  .mi .m span { white-space: nowrap; }
+  .mi .rec { color: #fff; background: var(--m3); font-size: 10px; font-weight: 700; letter-spacing: .4px; padding: 0 5px; border-radius: 4px; }
+  mark.hit { background: var(--hit); color: var(--hitfg); border-radius: 2px; }
   .mi .snip { font-size: 11.5px; color: var(--muted); margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-style: italic; }
   .listempty { color: var(--muted); font-size: 13px; padding: 12px; text-align: center; }
 
   /* --- main pane --- */
   #pane { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+  /* nothing selected (no meetings yet / the selected one was deleted): no dead title, links or notes */
+  #pane.nosel #viewhead, #pane.nosel #notespanel { display: none; }
   #viewhead { padding: 12px 16px 10px; border-bottom: 1px solid var(--border); }
   #title { font-size: 18px; font-weight: 700; border: 1px solid transparent; border-radius: 6px; background: transparent; color: var(--fg); font-family: inherit; padding: 3px 6px; width: 100%; }
   #title:hover { border-color: var(--border); }
@@ -84,6 +110,7 @@
   #viewmeta { display: flex; align-items: center; gap: 12px; margin-top: 6px; font-size: 12.5px; color: var(--muted); padding-left: 6px; }
   #viewmeta a, #viewmeta button { color: var(--accent); font-size: 12.5px; text-decoration: none; background: none; border: 0; cursor: pointer; font-family: inherit; padding: 0; }
   #viewmeta button.danger { color: var(--m3); }
+  #viewmeta button.danger.armed { color: #fff; background: var(--m3); font-weight: 700; padding: 1px 8px; border-radius: 5px; text-decoration: none; }
   #viewmeta a:hover, #viewmeta button:hover { text-decoration: underline; }
 
   #content { flex: 1; display: flex; min-height: 0; }
@@ -101,13 +128,39 @@
   .badge.them { background: var(--badge-them-bg); color: var(--badge-them-fg); }
   .zh { color: var(--zh); font-weight: 600; margin-top: 2px; }
   .zh.pending { color: var(--muted); font-weight: 400; font-style: italic; }
+  .zh.pending:empty::after { content: "translating…"; font-size: 13px; }
   .sp { font-weight: 700; margin-right: 4px; }
   .sp.me.s0 { color: var(--m1); } .sp.me.s1 { color: var(--m2); } .sp.me.s2 { color: var(--m3); } .sp.me.s3 { color: var(--m4); }
   .sp.them.s0 { color: var(--t1); } .sp.them.s1 { color: var(--t2); } .sp.them.s2 { color: var(--t3); } .sp.them.s3 { color: var(--t4); }
   .del { color: var(--del); text-decoration: line-through; }
   .add { color: var(--add); font-weight: 600; }
+  #scroll.nodiff .del { display: none; }
+  #scroll.nodiff .add { color: inherit; font-weight: inherit; }
   #livepartials .en { color: var(--partial); }
+  /* provisional translation of the in-progress sentence; the final translation replaces it */
+  #livepartials .zh { font-weight: 400; opacity: .8; }
   .empty { color: var(--muted); text-align: center; margin-top: 16vh; font-size: 14px; }
+  /* shown while reading back through a live transcript; sticks to the bottom of the view */
+  #jump { position: sticky; bottom: 4px; display: block; margin: 8px auto 0; padding: 6px 14px; border: 0; border-radius: 16px; background: var(--accent); color: #fff; font: inherit; font-size: 13px; font-weight: 600; cursor: pointer; box-shadow: 0 2px 8px rgba(0,0,0,.25); }
+  #jump[hidden] { display: none; }
+
+  /* --- narrower windows: the transcript keeps a readable width (at 860px it was squeezed to
+     ~285px between the fixed 264px list and 300px notes; at 480px to a sliver under the notes) */
+  @media (max-width: 1100px) {
+    #sidebar { width: 220px; }
+    #notespanel { width: 240px; }
+  }
+  @media (max-width: 900px) {  /* notes go under the transcript */
+    #content { flex-direction: column; }
+    #notespanel { width: auto; height: 26vh; min-height: 110px; border-left: 0; border-top: 1px solid var(--border); }
+  }
+  @media (max-width: 640px) {  /* the meeting list goes on top */
+    header { gap: 8px; padding: 8px 12px; }
+    #body { flex-direction: column; }
+    #sidebar { width: auto; flex: none; max-height: 28vh; border-right: 0; border-bottom: 1px solid var(--border); }
+    #viewmeta { flex-wrap: wrap; row-gap: 2px; }
+    #scroll { padding: 12px; }
+  }
 </style>
 </head>
 <body>
@@ -120,15 +173,25 @@
   </div>
   <select id="lang" title="Spoken language → translation"></select>
   <button id="toggle">Start</button>
-  <div id="status"><span class="led"></span><span id="statustext">idle</span></div>
+  <div id="status" aria-live="polite"><span class="led"></span><span id="statustext">Ready</span></div>
   <div class="spacer"></div>
+  <button id="glossarybtn" aria-expanded="false" aria-controls="glossary" title="Names and jargon the models should get right">Glossary</button>
   <label class="chk"><input type="checkbox" id="diffchk" checked> diff</label>
   <label class="chk"><input type="checkbox" id="autochk" checked> auto-scroll</label>
 </header>
-<div id="banner"></div>
+<div id="banner" role="status"><span id="bannertext"></span><button id="bannerclose" title="Dismiss" aria-label="Dismiss">×</button></div>
 <div id="progress">
   <span id="progresstext"></span>
   <div class="bar"><i id="progressfill"></i></div>
+</div>
+<div id="glossary" hidden>
+  <div class="ghead"><b>Glossary</b><span id="glossarystatus"></span></div>
+  <textarea id="glossarytext" spellcheck="false" aria-label="Glossary, one entry per line"
+    placeholder="Flander&#10;MPPS&#10;联调 = integration testing"></textarea>
+  <div class="gfoot">
+    <span>One name or term per line. Add “= translation” to fix how it is translated (either direction). Recognition uses the terms with the Qwen3 presets (Chinese, mixed, English accurate); translation uses them with every preset. Takes effect from the next sentence.</span>
+    <button id="glossarysave">Save</button>
+  </div>
 </div>
 
 <div id="body">
@@ -136,7 +199,7 @@
     <input id="search" type="search" placeholder="Search meetings…">
     <div id="meetinglist"></div>
   </aside>
-  <section id="pane">
+  <section id="pane" class="nosel">
     <div id="viewhead">
       <input id="title" placeholder="Untitled meeting">
       <div id="viewmeta">
@@ -152,6 +215,7 @@
         <div id="livepartials"></div>
         <div id="pastdoc" class="doc" style="display:none"></div>
         <div class="empty" id="empty">Pick a source and click Start — or select a past meeting.</div>
+        <button id="jump" hidden>↓ Back to live</button>
       </div>
       <div id="notespanel">
         <div class="nhead"><span>Notes</span><span class="saved" id="notesaved"></span></div>
@@ -166,7 +230,8 @@
   "use strict";
   const $ = (s) => document.querySelector(s);
   const scroll = $("#scroll"), livedoc = $("#livedoc"), livepartials = $("#livepartials");
-  const pastdoc = $("#pastdoc"), empty = $("#empty"), banner = $("#banner");
+  const pastdoc = $("#pastdoc"), empty = $("#empty"), banner = $("#banner"), pane = $("#pane");
+  const bannerText = $("#bannertext"), jumpBtn = $("#jump");
   const progressEl = $("#progress"), progressText = $("#progresstext"), progressFill = $("#progressfill");
   const toggle = $("#toggle"), statusEl = $("#status"), statusText = $("#statustext");
   const sourceBtns = Array.from(document.querySelectorAll("#source button"));
@@ -175,16 +240,25 @@
   const titleEl = $("#title"), metaText = $("#metatext"), exportA = $("#export"),
         deleteBtn = $("#delete"), notesEl = $("#notes"), notesaved = $("#notesaved");
 
-  const st = { running: false, liveId: null, selected: null, source: "both", lang: "en",
-               meetings: [], liveSeen: new Set() };
+  const st = { running: false, phase: "idle", liveId: null, liveMeta: null, selected: null,
+               source: "both", lang: "en", translate: true, meetings: [], liveSeen: new Set() };
   let bannerTimer = null, notesTimer = null;
+  const EMPTY_IDLE = "Pick a source and click Start — or select a past meeting.";
+  const EMPTY_LIVE = "Listening — captions appear here as people speak.";
 
   // --- api ---
+  // Every call resolves, never rejects: a network failure or a non-JSON reply becomes
+  // {ok: false, error}, so callers can report it (an unhandled rejection used to abort e.g.
+  // the status handler when the engine restarted).
+  const UNREACHABLE = "can't reach the livecaption engine";
+  const call = (p, opts) => fetch(p, opts)
+    .then((r) => r.json().catch(() => ({ ok: false, error: "HTTP " + r.status })))
+    .catch(() => ({ ok: false, error: UNREACHABLE }));
   const api = {
-    get: (p) => fetch(p).then((r) => r.json()),
-    post: (p, b) => fetch(p, { method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(b || {}) }).then((r) => r.json()),
-    del: (p) => fetch(p, { method: "DELETE" }).then((r) => r.json()),
+    get: (p) => call(p),
+    post: (p, b) => call(p, { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(b || {}) }),
+    del: (p) => call(p, { method: "DELETE" }),
   };
 
   // --- shared render helpers (used for both live stream and saved meetings) ---
@@ -209,7 +283,10 @@
       if (i) container.appendChild(document.createTextNode("  "));
       const sp = speakerSpan(seg.speaker, side);
       if (sp) container.appendChild(sp);
-      if (seg.diff && diffChk.checked) {
+      // always render the correction spans; the diff checkbox only toggles their styling
+      // (.nodiff), so it also applies to lines already on screen -- same+add spans read as
+      // exactly seg.text once the struck-out ones are hidden
+      if (seg.diff) {
         seg.diff.forEach(([kind, words]) => {
           if (kind === "same") { container.appendChild(document.createTextNode(words)); }
           else {
@@ -233,8 +310,9 @@
       container.appendChild(document.createTextNode(seg.zh));
     });
   }
-  // build one finalized utterance block (used by live finals and saved meetings)
-  function makeUtterance(u) {
+  // build one finalized utterance block (used by live finals and saved meetings); only a live
+  // line can still be waiting for its translation -- a saved one without it never gets one
+  function makeUtterance(u, live) {
     const side = sideOf(u.label);
     const el = document.createElement("div");
     el.className = "u"; el.id = "u-" + cssId(u.key);
@@ -245,13 +323,18 @@
     en.appendChild(body);
     renderEn(body, u.en, side);
     const zh = document.createElement("div"); zh.className = "zh";
-    if (u.zh) { renderZh(zh, u.zh, side); } else { zh.classList.add("pending"); }
+    if (u.zh) { renderZh(zh, u.zh, side); } else if (live && st.translate) { zh.classList.add("pending"); }
     el.appendChild(en); el.appendChild(zh);
     return el;
   }
   const nearBottom = () => scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 60;
-  function maybeScroll(was) { if (autoChk.checked && was) scroll.scrollTop = scroll.scrollHeight; }
   const viewingLive = () => st.selected && st.selected === st.liveId;
+  // reading back through a live transcript: new lines don't yank the view down (auto-scroll
+  // only follows while you're at the bottom), so offer the way back instead
+  function updateJump() { jumpBtn.hidden = !(viewingLive() && !nearBottom()); }
+  function maybeScroll(was) { if (autoChk.checked && was) scroll.scrollTop = scroll.scrollHeight; updateJump(); }
+  scroll.addEventListener("scroll", updateJump, { passive: true });
+  jumpBtn.addEventListener("click", () => { scroll.scrollTop = scroll.scrollHeight; updateJump(); });
 
   // --- live SSE rendering (targets livedoc/livepartials) ---
   function upsertFinal(ev) {
@@ -260,9 +343,17 @@
     const was = nearBottom();
     let u = document.getElementById("u-" + cssId(ev.key));
     const rec = { key: ev.key, label: ev.label, at: ev.at, en: ev.segments, zh: null };
-    if (!u) { livedoc.appendChild(makeUtterance(rec)); }
+    if (!u) { livedoc.appendChild(makeUtterance(rec, true)); updateLiveCount(); }
     else { renderEn(u.querySelector(".enbody"), ev.segments, sideOf(ev.label)); }
     if (viewingLive()) { empty.style.display = "none"; maybeScroll(was); }
+  }
+  // the live meeting's line count, in the header and its list entry (both were frozen at the
+  // value fetched when the meeting was opened -- "0 lines" for a whole recording)
+  function updateLiveCount() {
+    const n = livedoc.children.length;
+    if (viewingLive() && st.liveMeta) metaText.textContent = metaSummary({ ...st.liveMeta, utterances: n });
+    const c = listEl.querySelector('.mi[data-id="' + st.liveId + '"] .n');
+    if (c) c.textContent = "· " + n;
   }
   function applyTranslation(ev) {
     const u = document.getElementById("u-" + cssId(ev.key)); if (!u) return;
@@ -281,11 +372,14 @@
       const ts = document.createElement("span"); ts.className = "ts";
       const body = document.createElement("span"); body.className = "pbody";
       en.appendChild(ts); en.appendChild(badgeFor(side)); en.appendChild(body);
+      const zh = document.createElement("div"); zh.className = "zh";  // live translation preview
+      p.appendChild(en); p.appendChild(zh);
       // partials share the multi state of livedoc for badge visibility
       if (livedoc.classList.contains("multi")) p.classList.add("multi");
       p.classList.add("doc");
       livepartials.appendChild(p);
     }
+    if (p.dataset.key !== ev.key) p.querySelector(".zh").textContent = "";  // a new sentence
     p.dataset.key = ev.key;
     p.querySelector(".ts").textContent = ev.at;
     const body = p.querySelector(".pbody"); body.textContent = "";
@@ -293,12 +387,74 @@
     body.appendChild(document.createTextNode(ev.text));
     if (viewingLive()) { empty.style.display = "none"; maybeScroll(was); }
   }
+  function applyPreview(ev) {
+    // provisional translation of the sentence still being spoken; ignore a late one whose
+    // sentence was already finalized (its partial line is gone or moved to the next sentence)
+    const p = document.getElementById("p-" + ev.label);
+    if (!p || p.dataset.key !== ev.key) return;
+    const was = nearBottom();
+    renderZh(p.querySelector(".zh"), ev.segments, sideOf(ev.label));
+    if (viewingLive()) maybeScroll(was);
+  }
   function flushPending() {
     livedoc.querySelectorAll(".zh.pending").forEach((z) => { z.classList.remove("pending"); z.textContent = ""; });
+  }
+  // The live view only holds what streamed in since this page connected: a page opened or
+  // reloaded mid-recording started empty, and lines/translations that went out while the
+  // connection was down were missing. Fill both in from the saved record, in saved order;
+  // lines streamed after the fetch (not in it yet) stay after them.
+  function mergeSavedIntoLive(saved) {
+    const savedIds = new Set(saved.map((u) => "u-" + cssId(u.key)));
+    let next = Array.from(livedoc.children).find((c) => !savedIds.has(c.id)) || null;
+    for (let i = saved.length - 1; i >= 0; i--) {
+      const u = saved[i];
+      if (!st.liveSeen.has(u.label)) { st.liveSeen.add(u.label); if (st.liveSeen.size > 1) livedoc.classList.add("multi"); }
+      const el = livedoc.querySelector("#u-" + cssId(u.key));
+      if (el) {
+        const zh = el.querySelector(".zh.pending");
+        if (zh && u.zh) { zh.classList.remove("pending"); renderZh(zh, u.zh, sideOf(u.label)); }
+        next = el;
+      } else {
+        const node = makeUtterance(u, true);
+        livedoc.insertBefore(node, next);
+        next = node;
+      }
+    }
   }
   function clearLive() {
     livedoc.textContent = ""; livepartials.textContent = "";
     livedoc.classList.remove("multi"); st.liveSeen = new Set();
+  }
+
+  // Mark every case-insensitive occurrence of q in root's transcript text (not timestamps or
+  // labels) and return the first mark; q = "" just clears earlier marks. A match split across
+  // a correction span isn't marked -- the search result still lists the meeting.
+  function highlight(root, q) {
+    root.querySelectorAll("mark.hit").forEach((m) => m.replaceWith(m.textContent));
+    root.normalize();
+    if (!q) return null;
+    const needle = q.toLowerCase();
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    const nodes = [];
+    while (walker.nextNode()) nodes.push(walker.currentNode);
+    let first = null;
+    nodes.forEach((n) => {
+      const text = n.nodeValue, low = text.toLowerCase();
+      let i = low.indexOf(needle);
+      if (i < 0 || n.parentElement.closest(".ts, .sp, .badge")) return;
+      const frag = document.createDocumentFragment();
+      let pos = 0;
+      while (i >= 0) {
+        frag.append(text.slice(pos, i));
+        const m = document.createElement("mark"); m.className = "hit";
+        m.textContent = text.slice(i, i + needle.length); frag.append(m);
+        first = first || m;
+        pos = i + needle.length; i = low.indexOf(needle, pos);
+      }
+      frag.append(text.slice(pos));
+      n.replaceWith(frag);
+    });
+    return first;
   }
 
   // --- meeting list / selection ---
@@ -307,6 +463,9 @@
     return iso.replace("T", " ").slice(5, 16); // MM-DD HH:MM
   }
   function renderList(items, isSearch) {
+    // the list is rebuilt on every refresh: hand keyboard focus back to the same entry after
+    const a = document.activeElement;
+    const focusedId = a && a.classList && a.classList.contains("mi") ? a.dataset.id : null;
     listEl.textContent = "";
     if (!items.length) {
       const e = document.createElement("div"); e.className = "listempty";
@@ -316,19 +475,28 @@
     items.forEach((m) => {
       const el = document.createElement("div");
       el.className = "mi" + (m.id === st.selected ? " sel" : "");
+      el.dataset.id = m.id;
       const t = document.createElement("div"); t.className = "t"; t.textContent = m.title || m.id;
       const meta = document.createElement("div"); meta.className = "m";
       if (m.id === st.liveId) {
         const r = document.createElement("span"); r.className = "rec"; r.textContent = "● REC"; meta.appendChild(r);
       }
+      el.tabIndex = 0; el.setAttribute("role", "button");  // reachable and openable by keyboard
       const d = document.createElement("span"); d.textContent = fmtDate(m.created_at); meta.appendChild(d);
-      const c = document.createElement("span"); c.textContent = "· " + (m.utterances || 0); meta.appendChild(c);
+      const c = document.createElement("span"); c.className = "n"; meta.appendChild(c);
+      c.textContent = "· " + (m.id === st.liveId ? Math.max(m.utterances || 0, livedoc.children.length) : (m.utterances || 0));
       if (m.source) { const s = document.createElement("span"); s.textContent = "· " + m.source; meta.appendChild(s); }
       if (m.lang_label) { const l = document.createElement("span"); l.textContent = "· " + m.lang_label; meta.appendChild(l); }
       el.appendChild(t); el.appendChild(meta);
       if (m.snippet) { const sn = document.createElement("div"); sn.className = "snip"; sn.textContent = m.snippet; el.appendChild(sn); }
       el.addEventListener("click", () => selectMeeting(m.id));
+      el.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" || e.key === " ") { e.preventDefault(); selectMeeting(m.id); }
+        else if (e.key === "ArrowDown" && el.nextElementSibling) { e.preventDefault(); el.nextElementSibling.focus(); }
+        else if (e.key === "ArrowUp" && el.previousElementSibling) { e.preventDefault(); el.previousElementSibling.focus(); }
+      });
       listEl.appendChild(el);
+      if (m.id === focusedId) el.focus();
     });
   }
   async function refreshList() {
@@ -345,22 +513,42 @@
     return parts.join(" · ");
   }
 
+  const markSelected = (id) => Array.from(listEl.children).forEach((c) => c.classList.toggle("sel", c.dataset.id === id));
+  let selectSeq = 0;
   async function selectMeeting(id) {
+    const seq = ++selectSeq;
+    const same = st.selected === id;
+    if (!same) disarmDelete();  // a pending "click again to delete" was for the meeting being left
+    await saveNotesNow();  // typed notes belong to the meeting being left (or reloaded)
     st.selected = id;
-    Array.from(listEl.children).forEach((c) => c.classList.remove("sel"));
+    markSelected(id);
     // load meeting record (for title, notes, meta, and — for past — utterances)
-    const data = await api.get("/meetings/" + id).catch(() => null);
-    if (!data || data.error) return;
+    const data = await api.get("/meetings/" + id);
+    // a later click won the race: rendering this older response would show one meeting while
+    // st.selected (where notes and renames are saved) is another
+    if (seq !== selectSeq) return;
+    if (data.error) { showBanner("warn", "Couldn't open that meeting: " + data.error); return; }
+    pane.classList.remove("nosel");
     titleEl.value = data.title || "";
-    notesEl.value = data.notes || ""; notesaved.textContent = "";
-    metaText.textContent = metaSummary({ created_at: data.created_at, source: data.source,
-      lang_label: data.lang_label, utterances: (data.utterances || []).length });
+    if (!(same && document.activeElement === notesEl)) {  // never yank text from under the cursor
+      notesEl.value = data.notes || ""; notesaved.textContent = "";
+    }
+    const meta = { created_at: data.created_at, source: data.source, lang_label: data.lang_label };
+    metaText.textContent = metaSummary({ ...meta, utterances: (data.utterances || []).length });
     exportA.href = "/meetings/" + id + "/export.md";
     const isLive = (id === st.liveId);
     deleteBtn.style.display = isLive ? "none" : "";
+    // Re-rendering the meeting already on screen (e.g. live -> saved on Stop) keeps the reader's
+    // place, or the bottom if they were following it; another meeting opens at its start, the
+    // live one at its newest line. (The page used to land at whatever offset it had before.)
+    const keep = same ? { top: scroll.scrollTop, bottom: nearBottom() } : null;
     // render body: live shows the streaming DOM, past renders from saved utterances
     if (isLive) {
+      st.liveMeta = meta;
+      mergeSavedIntoLive(data.utterances || []);
+      updateLiveCount();
       livedoc.style.display = ""; livepartials.style.display = ""; pastdoc.style.display = "none";
+      empty.textContent = EMPTY_LIVE;
       empty.style.display = (livedoc.children.length || livepartials.children.length) ? "none" : "";
     } else {
       livedoc.style.display = "none"; livepartials.style.display = "none"; pastdoc.style.display = "";
@@ -373,23 +561,38 @@
         e.textContent = "No transcript in this meeting."; pastdoc.appendChild(e);
       }
     }
-    // reflect selection highlight in the list
-    Array.from(listEl.children).forEach((c) => {
-      const t = c.querySelector(".t"); c.classList.toggle("sel", t && t.textContent === (data.title || id));
-    });
+    if (keep) scroll.scrollTop = keep.bottom ? scroll.scrollHeight : keep.top;
+    else scroll.scrollTop = isLive ? scroll.scrollHeight : 0;
+    // opened from a search: show where the words are, not just which meeting has them
+    const hit = isLive ? null : highlight(pastdoc, searchEl.value.trim());
+    if (hit && !keep) hit.scrollIntoView({ block: "center" });
+    updateJump();
     refreshList();
   }
 
-  // --- notes autosave ---
+  // --- notes autosave (debounced; flushed when switching meetings or leaving the page) ---
+  let notesPending = null;  // {id, notes} typed but not sent yet
+  function saveNotesNow() {
+    if (notesTimer) { clearTimeout(notesTimer); notesTimer = null; }
+    const p = notesPending; notesPending = null;
+    if (!p) return Promise.resolve();
+    return api.post("/meetings/" + p.id + "/notes", { notes: p.notes }).then((r) => {
+      if (st.selected === p.id) notesaved.textContent = r.ok ? "saved" : "not saved: " + (r.error || "error");
+    });
+  }
   notesEl.addEventListener("input", () => {
     if (!st.selected) return;
     notesaved.textContent = "saving…";
+    notesPending = { id: st.selected, notes: notesEl.value };
     if (notesTimer) clearTimeout(notesTimer);
-    const id = st.selected, val = notesEl.value;
-    notesTimer = setTimeout(async () => {
-      await api.post("/meetings/" + id + "/notes", { notes: val });
-      if (st.selected === id) notesaved.textContent = "saved";
-    }, 700);
+    notesTimer = setTimeout(saveNotesNow, 700);
+  });
+  // closing the tab inside the debounce window would drop the last keystrokes
+  window.addEventListener("pagehide", () => {
+    if (!notesPending) return;
+    navigator.sendBeacon("/meetings/" + notesPending.id + "/notes",
+      new Blob([JSON.stringify({ notes: notesPending.notes })], { type: "application/json" }));
+    notesPending = null;
   });
 
   // --- title rename ---
@@ -400,17 +603,33 @@
   titleEl.addEventListener("blur", saveTitle);
   titleEl.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); titleEl.blur(); } });
 
-  // --- delete ---
+  // --- delete: two clicks on the button itself instead of a blocking confirm() dialog ---
+  let deleteArmed = null;  // {id, timer} while "Click again to delete" is showing
+  function disarmDelete() {
+    if (!deleteArmed) return;
+    clearTimeout(deleteArmed.timer); deleteArmed = null;
+    deleteBtn.textContent = "Delete"; deleteBtn.classList.remove("armed");
+  }
   deleteBtn.addEventListener("click", async () => {
-    if (!st.selected || st.selected === st.liveId) return;
-    if (!confirm("Delete this meeting?")) return;
-    const r = await api.del("/meetings/" + st.selected);
-    if (r.ok) {
-      st.selected = null; pastdoc.textContent = ""; titleEl.value = ""; notesEl.value = "";
-      metaText.textContent = ""; empty.style.display = "";
-      await refreshList();
-      if (st.meetings.length) selectMeeting(st.meetings[0].id);
+    const id = st.selected;
+    if (!id || id === st.liveId) return;
+    if (!deleteArmed || deleteArmed.id !== id) {
+      disarmDelete();
+      deleteArmed = { id, timer: setTimeout(disarmDelete, 4000) };
+      deleteBtn.textContent = "Click again to delete"; deleteBtn.classList.add("armed");
+      return;
     }
+    disarmDelete();
+    const r = await api.del("/meetings/" + id);
+    if (!r.ok) { showBanner("warn", "Couldn't delete: " + (r.error || "it is being recorded")); return; }
+    if (st.selected === id) {
+      st.selected = null; pastdoc.textContent = ""; titleEl.value = ""; notesEl.value = "";
+      metaText.textContent = ""; pane.classList.add("nosel");
+      empty.textContent = EMPTY_IDLE; empty.style.display = "";
+    }
+    showBanner("info", "Meeting deleted.");
+    await refreshList();
+    if (!st.selected && st.meetings.length) selectMeeting(st.meetings[0].id);
   });
 
   // --- search ---
@@ -419,11 +638,16 @@
     if (searchTimer) clearTimeout(searchTimer);
     const q = searchEl.value.trim();
     searchTimer = setTimeout(async () => {
+      highlight(pastdoc, q);  // keep the open meeting's marks in step with the box
       if (!q) { renderList(st.meetings, false); return; }
       const r = await api.get("/search?q=" + encodeURIComponent(q));
       renderList(r.results || [], true);
     }, 250);
   });
+  function clearSearch() {
+    if (!searchEl.value) return;
+    searchEl.value = ""; highlight(pastdoc, "");
+  }
 
   // --- SSE ---
   function connect() {
@@ -434,13 +658,21 @@
         case "partial": upsertPartial(ev); break;
         case "final": upsertFinal(ev); break;
         case "translation": applyTranslation(ev); break;
+        case "preview": applyPreview(ev); break;
         case "flush": flushPending(); break;
         case "status": onStatus(ev); break;
         case "progress": showProgress(ev); break;
         case "log": showBanner(ev.level, ev.message); break;
       }
     };
-    es.onerror = () => {};
+    // EventSource reconnects by itself and the engine replays its status on connect, which
+    // restores the controls; meanwhile say so instead of showing a stale "Listening"
+    es.onerror = () => {
+      statusEl.className = "offline"; statusText.textContent = "Reconnecting…";
+      toggle.disabled = true;
+    };
+    // back online: a warning about the engine being unreachable is stale now
+    es.onopen = () => { if (bannerText.textContent.includes(UNREACHABLE)) hideBanner(); };
   }
 
   function showProgress(ev) {
@@ -453,16 +685,21 @@
     progressFill.parentElement.style.display = ev.pct != null ? "block" : "none";
   }
 
+  const STATUS_TEXT = { idle: "Ready", starting: "Starting…", listening: "Listening", stopping: "Stopping…" };
+  const TOGGLE_TEXT = { idle: "Start", starting: "Cancel", listening: "Stop", stopping: "Stopping…" };
   function setStatusPill(state) {
+    st.phase = state;
     st.running = (state === "listening" || state === "starting" || state === "stopping");
     if (state !== "starting") progressEl.style.display = "none";
-    statusEl.className = state; statusText.textContent = state;
-    toggle.textContent = (state === "idle") ? "Start"
-      : (state === "starting" ? "Starting…" : (state === "stopping" ? "Stopping…" : "Stop"));
+    statusEl.className = state; statusText.textContent = STATUS_TEXT[state] || state;
+    toggle.textContent = TOGGLE_TEXT[state] || "Start";
     toggle.classList.toggle("running", state === "listening" || state === "stopping");
-    toggle.disabled = (state === "starting" || state === "stopping");
+    // model loading can take minutes on a first run: Start can be cancelled while it lasts
+    toggle.classList.toggle("cancel", state === "starting");
+    toggle.disabled = (state === "stopping");
     sourceBtns.forEach((b) => (b.disabled = st.running));
     langEl.disabled = st.running;
+    document.title = state === "listening" ? "● Listening · livecaption" : "livecaption";
   }
 
   async function onStatus(ev) {
@@ -473,10 +710,17 @@
     }
     if (ev.lang) { st.lang = ev.lang; langEl.value = ev.lang; }
     if (ev.state === "listening" && ev.meeting) {
-      if (ev.meeting !== st.liveId) clearLive();       // new recording started
+      const started = ev.meeting !== st.liveId;
+      if (started) {                                    // new recording started:
+        clearLive();
+        clearSearch();                                  // filtered results would hide its ● REC entry
+      }
       st.liveId = ev.meeting;
       await refreshList();
-      selectMeeting(ev.meeting);                        // jump to the live meeting
+      // jump to a recording that just started; the replay of the same status (page load,
+      // reconnect) only re-syncs the live view if it's the one being read -- it used to yank
+      // the reader back from whatever meeting they had opened meanwhile
+      if (started || st.selected === ev.meeting) selectMeeting(ev.meeting);
     } else if (ev.state === "idle") {
       const ended = st.liveId; st.liveId = null;
       await refreshList();
@@ -485,38 +729,109 @@
     }
   }
 
+  // info notices fade after 6 s; warnings stay until dismissed (×) or replaced
+  function hideBanner() { banner.classList.remove("shown"); }
   function showBanner(level, msg) {
-    banner.textContent = msg; banner.style.display = "block";
+    bannerText.textContent = msg; banner.classList.add("shown");
     banner.style.color = level === "warn" ? "var(--warn)" : "var(--muted)";
     banner.style.background = level === "warn" ? "var(--warnbg)" : "var(--panel)";
     if (bannerTimer) clearTimeout(bannerTimer);
-    if (level !== "warn") bannerTimer = setTimeout(() => { banner.style.display = "none"; }, 6000);
+    bannerTimer = level !== "warn" ? setTimeout(hideBanner, 6000) : null;
   }
+  $("#bannerclose").addEventListener("click", hideBanner);
+
+  // --- glossary: names / jargon for recognition and translation (stored by the engine) ---
+  const glossaryBtn = $("#glossarybtn"), glossaryEl = $("#glossary");
+  const glossaryText = $("#glossarytext"), glossaryStatus = $("#glossarystatus");
+  let glossarySaved = "";
+  const termsLabel = (n) => n + (n === 1 ? " term" : " terms");
+  async function openGlossary(open) {
+    glossaryEl.hidden = !open; glossaryBtn.setAttribute("aria-expanded", String(open));
+    if (!open) return;
+    const r = await api.get("/glossary");
+    if (r.error) { glossaryStatus.textContent = "couldn't load: " + r.error; return; }
+    glossaryText.value = glossarySaved = r.text || "";
+    glossaryStatus.textContent = termsLabel(r.terms || 0);
+    glossaryText.focus();
+  }
+  async function saveGlossary() {
+    const text = glossaryText.value;
+    glossaryStatus.textContent = "saving…";
+    const r = await api.post("/glossary", { text });
+    if (!r.ok) { glossaryStatus.textContent = "not saved: " + (r.error || "error"); return; }
+    glossarySaved = text;
+    glossaryStatus.textContent = "saved · " + termsLabel(r.terms)
+      + (st.phase === "listening" ? " · in use from the next sentence" : "");
+  }
+  glossaryBtn.addEventListener("click", () => openGlossary(glossaryEl.hidden));
+  $("#glossarysave").addEventListener("click", saveGlossary);
+  glossaryText.addEventListener("input", () => {
+    if (glossaryText.value !== glossarySaved) glossaryStatus.textContent = "unsaved changes";
+  });
+  glossaryText.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); saveGlossary(); }
+    else if (e.key === "Escape") { openGlossary(false); glossaryBtn.focus(); }
+  });
+
+  // --- per-browser preferences (best effort: storage may be unavailable, e.g. private mode) ---
+  const prefs = {
+    get(k, dflt) {
+      try { const v = localStorage.getItem("livecaption." + k); return v === null ? dflt : JSON.parse(v); }
+      catch (_) { return dflt; }
+    },
+    set(k, v) { try { localStorage.setItem("livecaption." + k, JSON.stringify(v)); } catch (_) { /* ignore */ } },
+  };
 
   // --- controls ---
+  function setSource(src) {
+    st.source = src;
+    sourceBtns.forEach((x) => x.classList.toggle("active", x.dataset.src === src));
+  }
   sourceBtns.forEach((b) => b.addEventListener("click", () => {
     if (st.running) return;
-    st.source = b.dataset.src;
-    sourceBtns.forEach((x) => x.classList.toggle("active", x === b));
+    setSource(b.dataset.src); prefs.set("source", b.dataset.src);
   }));
-  langEl.addEventListener("change", () => { if (!st.running) st.lang = langEl.value; });
-  toggle.addEventListener("click", () => {
-    if (!st.running) api.post("/start", { source: st.source, lang: st.lang });
-    else api.post("/stop", {});
+  langEl.addEventListener("change", () => {
+    if (!st.running) { st.lang = langEl.value; prefs.set("lang", langEl.value); }
+  });
+  diffChk.checked = prefs.get("diff", true);
+  scroll.classList.toggle("nodiff", !diffChk.checked);
+  diffChk.addEventListener("change", () => {
+    scroll.classList.toggle("nodiff", !diffChk.checked); prefs.set("diff", diffChk.checked);
+  });
+  autoChk.checked = prefs.get("autoscroll", true);
+  autoChk.addEventListener("change", () => prefs.set("autoscroll", autoChk.checked));
+  toggle.addEventListener("click", async () => {
+    // idle: Start; starting: Cancel (stops the model loading); listening: Stop. The reply only
+    // says whether the request was accepted -- progress arrives as status events -- so only a
+    // refusal needs showing (e.g. another tab is already recording, or the engine is down).
+    const starting = st.phase === "idle";
+    const r = starting ? await api.post("/start", { source: st.source, lang: st.lang })
+                       : await api.post("/stop", {});
+    if (!r.ok) showBanner("warn", (starting ? "Couldn't start: " : "Couldn't stop: ") + (r.error || "unknown error"));
   });
 
   // --- init ---
   (async function init() {
     await refreshList();
-    const state = await api.get("/state").catch(() => ({}));
+    const state = await api.get("/state");
     // populate the language picker from the server's presets
     (state.langs || []).forEach((l) => {
       const o = document.createElement("option");
       o.value = l.key; o.textContent = l.label; langEl.appendChild(o);
     });
-    if (state.lang) { st.lang = state.lang; langEl.value = state.lang; }
+    // a running session dictates source/language (its status event follows); idle, the last
+    // choice made in this browser wins over the server's default
+    const lastLang = prefs.get("lang", null);
+    const lang = (!state.running && (state.langs || []).some((l) => l.key === lastLang)) ? lastLang : state.lang;
+    if (lang) { st.lang = lang; langEl.value = lang; }
+    st.translate = state.translate !== false;
+    const lastSource = prefs.get("source", st.source);
+    if (!state.running && sourceBtns.some((b) => b.dataset.src === lastSource)) setSource(lastSource);
     if (state.running && state.meeting) { st.liveId = state.meeting; }
     if (st.meetings.length) selectMeeting((st.liveId || st.meetings[0].id));
+    else empty.textContent = "Pick a source and click Start to record your first meeting.";
+    if (state.error) showBanner("warn", "The livecaption engine isn't responding (" + state.error + ") — retrying…");
     connect();
   })();
 })();

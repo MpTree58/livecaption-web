@@ -1,16 +1,20 @@
 """Manual smoke test for the qwen3 ASR backend: synthesize Chinese speech with macOS `say`,
 verify the QwenOnlineStream streaming path emits a sensible final.
 
-Checks three things end to end:
+Checks four things end to end:
 1. build_qwen_recognizer loads Qwen3-ASR (mlx-qwen3-asr) + Silero VAD (auto-downloaded)
 2. QwenOnlineStream fed in 100ms real-time chunks emits partial / final (VAD endpointing)
 3. The final text overlaps the spoken sentence (path is wired correctly, Chinese decodes)
+4. Decoding (incl. the two-pass re-decode) resolves no Hugging Face repo at all -- it must
+   use the loaded model's own files. Only meaningful for a model other than the package
+   default Qwen/Qwen3-ASR-0.6B (the two-pass once fetched that whole repo for a tokenizer),
+   e.g. the web UI's Six666/mlx-qwen3-asr-1.7b-8bit.
 
 Needs the optional [qwen] extra. Run with either:
     uv run --extra qwen python scripts/smoke_qwen.py
     uv run --with mlx-qwen3-asr python scripts/smoke_qwen.py
 Pass a model id to override (default uses the smaller 0.6B for speed):
-    uv run --with mlx-qwen3-asr python scripts/smoke_qwen.py Qwen/Qwen3-ASR-1.7B
+    uv run --with mlx-qwen3-asr python scripts/smoke_qwen.py Six666/mlx-qwen3-asr-1.7b-8bit
 """
 
 import subprocess
@@ -19,10 +23,24 @@ import tempfile
 import wave
 from pathlib import Path
 
+import huggingface_hub
 import numpy as np
 
 from livecaption.asr_qwen import build_qwen_recognizer
 from livecaption.config import SAMPLE_RATE
+
+# mlx-qwen3-asr resolves repo ids through huggingface_hub.snapshot_download (imported at call
+# time), so wrapping it records every repo the decode path touches
+resolved_repos: list[str] = []
+_snapshot_download = huggingface_hub.snapshot_download
+
+
+def _recording_snapshot_download(*args, **kwargs):  # noqa: ANN002, ANN003
+    resolved_repos.append(kwargs.get("repo_id") or args[0])
+    return _snapshot_download(*args, **kwargs)
+
+
+huggingface_hub.snapshot_download = _recording_snapshot_download
 
 TEXT = "今天天气很好，我们一起去公园散步吧。"
 MODEL = sys.argv[1] if len(sys.argv) > 1 else "Qwen/Qwen3-ASR-0.6B"
@@ -70,6 +88,7 @@ with tempfile.TemporaryDirectory() as td:
 
     rec = build_qwen_recognizer(MODEL, language="Chinese", log=print)
     print(f"recognizer built OK ({MODEL} + silero-vad)")
+    resolved_repos.clear()  # loading may resolve repos; decoding below must not
 
     # Simulate real-time: 100ms per chunk + 3s trailing silence so rule2 flushes the last
     # sentence (mirrors the live MicSource block size).
@@ -92,5 +111,6 @@ with tempfile.TemporaryDirectory() as td:
     ratio = char_overlap(TEXT, streamed)
     print(f"char overlap vs spoken text: {ratio:.0%}")
     assert ratio >= 0.5, f"streamed text diverges from spoken text ({ratio:.0%})"
+    assert not resolved_repos, f"decoding resolved Hugging Face repos: {resolved_repos}"
 
 print("qwen3 ASR smoke test PASSED")

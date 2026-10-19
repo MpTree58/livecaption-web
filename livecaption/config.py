@@ -160,6 +160,9 @@ MT_CONTEXT_SENTENCES = 3
 # Sources shorter than this many words are translated WITHOUT the background template:
 # a tiny fragment gives the model almost nothing to anchor on, and the output then tends
 # to drift into translating the background block itself instead of the source text.
+# Words are whitespace-split, so Chinese / mixed sources (few or no spaces) practically never
+# get the background -- keep it that way: on WMT20 zh->en the background template scored
+# 29.7 -> 27.6 BLEU (scripts/eval_mt.py --context 3).
 MT_CONTEXT_MIN_WORDS = 5
 # Live translation preview: while a sentence is still being spoken, show a provisional ZH line
 # under the EN partial, refreshed once the in-progress text has grown by this many words AND
@@ -173,6 +176,38 @@ TRANSLATE_PROMPT_WITH_CONTEXT = (
     "taking the provided background information into consideration.\n\n"
     "[Source Text]\n{text}"
 )
+# The README gives every template in Chinese too (with Chinese language names), verbatim below.
+# Into Chinese they translate measurably better than the English ones, so translate.py picks
+# the prompt by the TARGET language (scripts/eval_mt.py, 150 subtitle-length sentences,
+# BLEU): WMT20 en->zh 40.5 -> 42.1 without context and 37.6 -> 40.8 with it; IWSLT17 (TED)
+# en->zh likewise. Into English the English template stays: the Chinese one scored
+# 29.7 -> 25.6 on WMT20 zh->en.
+TRANSLATE_PROMPT_ZH = (
+    "将以下文本翻译为{target_lang}，"
+    "注意只需要输出翻译后的结果，不要额外解释：\n\n{text}"
+)
+TRANSLATE_PROMPT_WITH_CONTEXT_ZH = (
+    "【背景信息】\n"
+    "{context}\n\n"
+    "请结合背景信息将以下文本翻译为{target_lang}。\n\n"
+    "【待翻译文本】\n{text}"
+)
+# Terminology template (README "Terminology", both versions verbatim), for a sentence that
+# contains glossary terms (glossary.py): {terms} is one TERM_LINE per pair. There is no
+# official template combining terms with background, so such a sentence goes without it.
+TRANSLATE_PROMPT_TERMS = (
+    "Reference the following translations:\n{terms}\n\n"
+    "Translate the following text into {target_lang}. "
+    "Note that you must ONLY output the translated result "
+    "without any additional explanation:\n\n{text}"
+)
+TERM_LINE = "{source} translates to {target}"
+TRANSLATE_PROMPT_TERMS_ZH = (
+    "参考下面的翻译：\n{terms}\n"
+    "将以下文本翻译为{target_lang}，"
+    "注意只需要输出翻译后的结果，不要额外解释：\n\n{text}"
+)
+TERM_LINE_ZH = "{source} 翻译成 {target}"
 MT_TEMPERATURE = 0.7
 MT_TOP_P = 0.6
 MT_TOP_K = 20
@@ -180,3 +215,13 @@ MT_REPETITION_PENALTY = 1.05
 # plenty for a single subtitle line; just an upper-bound safeguard against the model running away
 MT_MAX_TOKENS = 256
 DEFAULT_TARGET_LANG = "zh-cn"
+
+# ---- Web UI session (webapp.py) ----
+# On Stop, the translator is usually a sentence or two behind the ASR. The meeting is only
+# closed once those last lines are translated (the UI shows "Stopping…" meanwhile), waiting at
+# most this long -- past it the remaining lines are saved untranslated, with a warning.
+WEB_STOP_DRAIN_SEC = 30.0
+# Minutes after a Stop before the idle server frees its models (webapp --idle-unload; 0 = keep
+# them loaded). The menu-bar app keeps the server running from login, and a warm preset holds
+# 3.5-4.7 GB of unified memory; reloading from the disk cache on the next Start takes ~2-4 s.
+WEB_IDLE_UNLOAD_MIN = 5.0

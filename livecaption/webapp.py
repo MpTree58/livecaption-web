@@ -5,17 +5,23 @@ process exactly as in the CLI -- the browser is a pure display+control surface r
 over a local HTTP server. Server-Sent Events stream captions to the page; small POST
 endpoints start/stop the pipeline and pick the source (mic / system / both).
 
-The heavy objects (Recognizer weights, Translator thread) are built once on the first
-Start and kept warm across Start/Stop, so repeated meeting sessions start instantly.
-Only the audio sources, ASR workers, and per-session transcript file are torn down on
-Stop. This mirrors cli.py's live-mode wiring; the one swap is WebSink in place of the
-terminal Renderer (same partial/final/translation/preview/flush_pending contract).
+The heavy objects (Recognizer weights, Translator thread) are built on the first Start and
+kept warm across Start/Stop, so repeated meeting sessions start instantly. Only the
+current language preset's models stay loaded: switching language frees the previous
+preset's ASR bundle, and one translator serves every preset. Only the audio sources, ASR
+workers, and per-session transcript file are torn down on Stop. This mirrors cli.py's
+live-mode wiring; the one swap is WebSink in place of the terminal Renderer (same
+partial/final/translation/preview/flush_pending contract).
 """
 
 from __future__ import annotations
 
+import contextlib
+import gc
+import ipaddress
 import json
 import os
+import signal
 import sys
 import threading
 import webbrowser
@@ -24,19 +30,20 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from queue import Empty
 
+import mlx.core as mx
 import typer
 from huggingface_hub import HfApi, snapshot_download
 from huggingface_hub import constants as hf_constants
 from huggingface_hub.constants import HF_HUB_CACHE, HF_XET_CACHE
 from rich.console import Console
 
-from . import config
+from . import config, glossary
 from .asr import AsrWorker, build_recognizer
 from .audio import AudioSource, MicSource, SystemAudioSource
 from .languages import normalize_target_language
 from .meetings import MeetingStore
 from .models import resolve_audiotee
-from .translate import Translator
+from .translate import Translator, preview_due
 from .websink import WebSink, _key
 
 console = Console()
@@ -51,23 +58,37 @@ hf_constants.HF_HUB_DISABLE_XET = True
 
 _WEBUI = Path(__file__).with_name("webui.html")
 _MEETINGS_DIR = Path.home() / ".cache" / "livecaption" / "meetings"
+_GLOSSARY_FILE = Path.home() / ".cache" / "livecaption" / "glossary.txt"  # see glossary.py
 
 # Language presets offered in the web UI. Each = a spoken-language ASR engine + a translation
 # direction. English uses the low-latency streaming nemotron; Chinese and mixed Chinese/English
 # use qwen3 (strong Chinese + native code-switching). Translation direction is the sensible
 # "other language" default and is trivially changed here (same MT model, different target).
+# "en-qwen" transcribes English with qwen3 too: markedly fewer errors (scripts/eval_asr.py:
+# LibriSpeech 5.4% -> 3.7%, Chinese-accented conversational English from CAiRE/ASCEND
+# 26.2% -> 17.0% mixed error rate) at the cost of nemotron's word-by-word live line (qwen3
+# refreshes it every ~2 s), its mid-sentence speaker splits (one speaker per sentence) and
+# ~1.2 GB more memory. The qwen3 presets share one loaded model (only the language differs).
 LANG_PRESETS = {
-    "en":    {"label": "English → 中文",  "asr_model": "nemotron-0.6b",   "asr_lang": "en-us", "target": "zh-cn"},  # noqa: E501
-    "zh":    {"label": "中文 → English",  "asr_model": "qwen3-1.7b-8bit", "asr_lang": "zh",    "target": "en"},     # noqa: E501
-    "mixed": {"label": "中英混合 → 中文", "asr_model": "qwen3-1.7b-8bit", "asr_lang": "zh",    "target": "zh-cn"},  # noqa: E501
+    "en":      {"label": "English → 中文",            "asr_model": "nemotron-0.6b",   "asr_lang": "en-us", "target": "zh-cn"},  # noqa: E501
+    "en-qwen": {"label": "English (accurate) → 中文", "asr_model": "qwen3-1.7b-8bit", "asr_lang": "en",    "target": "zh-cn"},  # noqa: E501
+    "zh":      {"label": "中文 → English",            "asr_model": "qwen3-1.7b-8bit", "asr_lang": "zh",    "target": "en"},     # noqa: E501
+    "mixed":   {"label": "中英混合 → 中文",           "asr_model": "qwen3-1.7b-8bit", "asr_lang": "zh",    "target": "zh-cn"},  # noqa: E501
 }
 
 
+class _StartCancelled(Exception):
+    """Stop was clicked while Start was still preparing the models (see Session.stop)."""
+
+
 class Session:
-    """Owns the live pipeline. Each language preset's ASR recognizer and translator are built
-    lazily on first use and kept warm in per-config caches, so switching language (or just
-    stopping/starting) reuses already-loaded models. Each Start spins up fresh audio sources +
-    ASR workers wired to the shared WebSink and the selected language's translator."""
+    """Owns the live pipeline. The ASR recognizer and the translator are built lazily on first
+    use and kept warm, so stopping/starting reuses already-loaded models. Only the current
+    language preset's recognizer is kept: each ASR bundle is 1.5-3 GB of unified memory, so
+    switching language frees the previous one (reloading from the disk cache takes seconds).
+    One translator serves every preset -- the translation direction is only a prompt
+    parameter, re-set per run. Each Start spins up fresh audio sources + ASR workers wired to
+    the shared WebSink and the translator."""
 
     def __init__(
         self,
@@ -83,6 +104,8 @@ class Session:
         audiotee_path: str | None,
         sync_url: str = "",
         sync_token: str = "",
+        idle_unload_min: float = config.WEB_IDLE_UNLOAD_MIN,
+        glossary_path: Path | None = None,
     ) -> None:
         self.sink = sink
         self.store = store
@@ -96,14 +119,32 @@ class Session:
         # optional central-server sync: push each finished meeting to a shared library
         self._sync_url = sync_url.rstrip("/")
         self._sync_token = sync_token
+        # names / jargon for recognition and translation, edited in the page (glossary.py);
+        # None = not persisted (tests)
+        self._glossary_path = glossary_path
+        self._glossary_text = ""
+        if glossary_path is not None and glossary_path.exists():
+            self._glossary_text = glossary_path.read_text(encoding="utf-8")
+        self._glossary = glossary.parse(self._glossary_text)
 
-        # warm caches, reused across start/stop and language switches
-        self._recognizers: dict[str, object] = {}  # recognizer-config key -> recognizer
-        self._translators: dict[str, Translator] = {}  # target prompt name -> translator
+        # warm models, reused across start/stop: the current preset's recognizer (with the
+        # config key it was built for) and the one translator shared by every preset
+        self._recognizer: object | None = None
+        self._recognizer_key: str | None = None
+        self._translator: Translator | None = None
+        # ...but only for a while: an idle server (the menu-bar app keeps it running from
+        # login) frees them after idle_unload_min minutes (0 = never)
+        self._idle_unload_min = idle_unload_min
+        self._idle_timer: threading.Timer | None = None
 
-        # serialize start/stop; _running is the user-visible state
+        # Run lifecycle, guarded by _op_lock: idle -> starting -> listening -> stopping -> idle.
+        # Start is only accepted when idle (a Start racing a still-finishing Stop would have
+        # its meeting closed by the old run's teardown); Stop while starting sets
+        # _cancel_start and the start thread backs out at its next checkpoint.
         self._op_lock = threading.Lock()
-        self._running = False
+        self._phase = "idle"
+        self._cancel_start = False
+        self._stop_thread: threading.Thread | None = None
 
         # per-session, rebuilt on each start
         self._sources: list[AudioSource] = []
@@ -119,15 +160,19 @@ class Session:
     def start(self, source_kind: str, lang: str | None = None) -> dict:
         lang = lang or self._default_lang
         with self._op_lock:
-            if self._running:
+            if self._phase == "stopping":
+                return {"ok": False, "error": "still stopping the previous recording"}
+            if self._phase != "idle":
                 return {"ok": False, "error": "already running"}
             if source_kind not in ("mic", "system", "both"):
                 return {"ok": False, "error": f"bad source {source_kind!r}"}
             if lang not in self._presets:
                 return {"ok": False, "error": f"bad lang {lang!r}"}
-            self._running = True
+            self._phase = "starting"
+            self._cancel_start = False
             self._lang = lang
-        self.sink.status("starting", source_kind, lang=lang)
+            self._cancel_idle_unload()
+            self.sink.status("starting", source_kind, lang=lang)
         threading.Thread(
             target=self._start_impl, args=(source_kind, lang), daemon=True, name="session-start"
         ).start()
@@ -135,18 +180,26 @@ class Session:
 
     def stop(self) -> dict:
         with self._op_lock:
-            if not self._running:
+            if self._phase == "starting":
+                # still preparing models: the start thread backs out at its next checkpoint
+                # and reports idle itself
+                self._cancel_start = True
+                self._phase = "stopping"
+                self.sink.status("stopping", None)
+                return {"ok": True}
+            if self._phase != "listening":
                 return {"ok": False, "error": "not running"}
-            self._running = False
-        self.sink.status("stopping", None)
-        threading.Thread(
-            target=self._stop_impl, daemon=True, name="session-stop"
-        ).start()
+            self._phase = "stopping"
+            self.sink.status("stopping", None)
+            self._stop_thread = threading.Thread(
+                target=self._stop_impl, daemon=True, name="session-stop"
+            )
+            self._stop_thread.start()
         return {"ok": True}
 
     def state(self) -> dict:
         return {
-            "running": self._running,
+            "running": self._phase in ("starting", "listening"),
             "translate": self._translate,
             "meeting": self._meeting.id if self._meeting else None,
             "lang": self._lang,
@@ -164,7 +217,12 @@ class Session:
             m.add_translation(_key(label, started_at), zh_segments)
         self.sink.translation(label, zh_segments, started_at)
 
-    # --- pipeline construction (cached per config so switching language stays warm) ---
+    # --- pipeline construction (models stay warm for the current language preset) ---
+    def _check_cancel(self) -> None:
+        """Start-thread checkpoint: back out if Stop was clicked while models were loading."""
+        if self._cancel_start:
+            raise _StartCancelled
+
     def _stage(self, message: str) -> None:
         """A model-preparation stage notice, shown on the persistent progress line (not the
         auto-hiding banner — during a long first start that line is the user's only feedback,
@@ -182,6 +240,7 @@ class Session:
         if self._translate:
             repos.append((self._mt_model_id, "translation model"))
         for i, (repo, what) in enumerate(repos, 1):
+            self._check_cancel()  # a multi-GB download is the likeliest time to change one's mind
             try:
                 _download_model(repo, f"Downloading {what} ({i}/{len(repos)})",
                                 self.sink.progress)
@@ -189,33 +248,90 @@ class Session:
                 self.sink.log("warn", f"Could not download {repo}: {e}")
 
     def _get_recognizer(self, preset: dict) -> object:
+        qwen = preset["backend"] == "qwen3"
         key = "|".join([
-            preset["backend"], preset["asr_model_id"], preset["asr_lang"],
+            # qwen3's language is a decode-time prompt (set_language below), not part of the
+            # loaded bundle: presets differing only in it share one model
+            preset["backend"], preset["asr_model_id"], "" if qwen else preset["asr_lang"],
             str(self._diarize), str(preset["word_diarize"]),
         ])
-        rec = self._recognizers.get(key)
-        if rec is None:
-            self._stage(f"Loading ASR model for {preset['label']} …")
-            if preset["backend"] == "qwen3":
-                from .asr_qwen import build_qwen_recognizer
+        if self._recognizer is not None and self._recognizer_key == key:
+            if qwen:
+                self._recognizer.set_language(preset["asr_lang"])
+            return self._recognizer
+        # a different preset: free the previous bundle BEFORE loading the next one, so the
+        # two never sit in memory together
+        self._release_recognizer()
+        self._stage(f"Loading ASR model for {preset['label']} …")
+        if preset["backend"] == "qwen3":
+            from .asr_qwen import build_qwen_recognizer
 
-                rec = build_qwen_recognizer(
-                    preset["asr_model_id"], preset["asr_lang"], self._diarize,
-                    self._diarize and preset["word_diarize"],
-                    log=self._stage,
-                )
-            else:
-                rec = build_recognizer(
-                    preset["asr_model_id"], preset["asr_lang"], self._diarize,
-                    log=self._stage,
-                )
-            self._recognizers[key] = rec
+            rec = build_qwen_recognizer(
+                preset["asr_model_id"], preset["asr_lang"], self._diarize,
+                self._diarize and preset["word_diarize"],
+                log=self._stage,
+            )
+        else:
+            rec = build_recognizer(
+                preset["asr_model_id"], preset["asr_lang"], self._diarize,
+                log=self._stage,
+            )
+        self._recognizer, self._recognizer_key = rec, key
         return rec
 
+    def _release_recognizer(self) -> None:
+        """Drop the warm recognizer and hand its memory back (no-op when none is loaded).
+        Only called while no run is active, so no ASR worker still references it."""
+        if self._recognizer is None:
+            return
+        self._recognizer = None
+        self._recognizer_key = None
+        _free_mlx_memory()
+
+    # --- idle unload: don't hold several GB of unified memory between meetings ---
+    def _arm_idle_unload(self) -> None:
+        if self._idle_unload_min <= 0:
+            return
+        with self._op_lock:
+            self._cancel_idle_unload()
+            timer = threading.Timer(self._idle_unload_min * 60, self._unload_idle_models)
+            timer.daemon = True  # never hold up process exit
+            timer.start()
+            self._idle_timer = timer
+
+    def _cancel_idle_unload(self) -> None:
+        """Caller holds _op_lock."""
+        if self._idle_timer is not None:
+            self._idle_timer.cancel()
+            self._idle_timer = None
+
+    def _unload_idle_models(self) -> None:
+        """Free every model after the configured idle time; the next Start reloads them from
+        the disk cache in seconds. Runs under _op_lock, so a concurrent Start either already
+        claimed the session (then nothing is unloaded) or waits for the unload to finish."""
+        with self._op_lock:
+            self._idle_timer = None
+            if self._phase != "idle" or (self._recognizer is None and self._translator is None):
+                return
+            if self._translator is not None:
+                # idle means drained: the thread is just waiting on its queue
+                self._translator.stop()
+                self._translator.join(timeout=10)
+                self._translator = None
+            self._recognizer = None
+            self._recognizer_key = None
+            _free_mlx_memory()
+        console.print(
+            f"[dim]Models unloaded after {self._idle_unload_min:g} idle minutes; the next "
+            "Start reloads them.[/dim]"
+        )
+
     def _get_translator(self, target_prompt: str) -> Translator:
-        tr = self._translators.get(target_prompt)
-        if tr is None:
-            self.sink.log("info", f"Loading translation model ({target_prompt}) …")
+        tr = self._translator
+        # (re)build on first use, or when the previous one's model failed to load (its
+        # thread has exited) -- a fresh Start retries instead of staying silently disabled
+        if tr is None or not tr.is_alive():
+            self.sink.log("info", "Loading translation model …")
             tr = Translator(
                 self._mt_model_id,
                 target_prompt,
@@ -226,7 +342,7 @@ class Session:
                 context_size=self._context,
             )
             tr.start()
-            self._translators[target_prompt] = tr
+            self._translator = tr
         return tr
 
     def _build_sources(self, source_kind: str) -> list[AudioSource]:
@@ -239,35 +355,30 @@ class Session:
         return sources
 
     def _start_impl(self, source_kind: str, lang: str) -> None:
+        sources: list[AudioSource] = []
+        workers: list[AsrWorker] = []
+        meeting = None
         try:
             preset = self._presets[lang]
             self._prepare_models(preset)
+            self._check_cancel()
             recognizer = self._get_recognizer(preset)
+            self._check_cancel()
             translator = self._get_translator(preset["target_prompt"]) if self._translate else None
             if translator is not None:
-                # fresh meeting: don't inherit the previous session's rolling context
-                translator.reset_context()
+                # fresh meeting: don't inherit the previous session's rolling context, and
+                # translate in this preset's direction
+                translator.reset_context(preset["target_prompt"])
+            self._apply_glossary()
             self._preview_words.clear()
-
-            sources = self._build_sources(source_kind)
-            meeting = self.store.create(
-                source=source_kind,
-                asr_lang=preset["asr_lang"],
-                target_lang=preset["target_prompt"] if self._translate else None,
-                created_at=datetime.now(),
-                lang=lang,
-                lang_label=preset["label"],
-            )
-            self._meeting = meeting
 
             def handle_partial(
                 label: str, text: str, started_at: datetime, speaker: int | None = None
             ) -> None:
                 self.sink.partial(label, text, started_at, speaker)
-                if translator and config.MT_PREVIEW_MIN_WORDS > 0:
-                    nwords = len(text.split())
-                    if nwords - self._preview_words.get(label, 0) >= config.MT_PREVIEW_MIN_WORDS \
-                            and any(c in text for c in ".?!"):
+                if translator:
+                    nwords = preview_due(text, self._preview_words.get(label, 0))
+                    if nwords is not None:
                         self._preview_words[label] = nwords
                         translator.submit_preview(label, [(speaker, text, None)], started_at)
 
@@ -286,22 +397,60 @@ class Session:
                 self.sink.log("warn", "ASR worker crashed; stopping.")
                 self.stop()
 
-            workers: list[AsrWorker] = []
-            for src in sources:
-                worker = AsrWorker(
-                    recognizer, src.queue, src.label, handle_partial, handle_final,
-                    on_error=on_worker_error,
-                    use_audio_timestamps=False,
+            # Commit point, atomic with respect to stop(): either Stop already asked to
+            # cancel (back out before any capture starts), or it sees "listening" with the
+            # sources and workers in place for _stop_impl to tear down.
+            with self._op_lock:
+                self._check_cancel()
+                sources = self._build_sources(source_kind)
+                meeting = self.store.create(
+                    source=source_kind,
+                    asr_lang=preset["asr_lang"],
+                    target_lang=preset["target_prompt"] if self._translate else None,
+                    created_at=datetime.now(),
+                    lang=lang,
+                    lang_label=preset["label"],
                 )
-                workers.append(worker)
-                worker.start()
-                src.start()
+                self._meeting = meeting
+                for src in sources:
+                    worker = AsrWorker(
+                        recognizer, src.queue, src.label, handle_partial, handle_final,
+                        on_error=on_worker_error,
+                        use_audio_timestamps=False,
+                    )
+                    workers.append(worker)
+                    worker.start()
+                    src.start()
 
-            self._sources = sources
-            self._workers = workers
-            self._source_kind = source_kind
-
-            self.sink.status("listening", source_kind, meeting.id, lang=lang)
+                self._sources = sources
+                self._workers = workers
+                self._source_kind = source_kind
+                self._phase = "listening"
+                self.sink.status("listening", source_kind, meeting.id, lang=lang)
+        except _StartCancelled:
+            with self._op_lock:
+                self._phase = "idle"
+                self.sink.status("idle", None)
+            self._arm_idle_unload()  # whatever loaded before the cancel
+        except Exception as e:  # noqa: BLE001 -- any failure must not leave a half-started run
+            # Tear down whatever did start -- e.g. "both" with the mic already capturing when
+            # audiotee fails -- or it would keep recording into a meeting nobody can stop.
+            self._meeting = None
+            for src in sources:
+                with contextlib.suppress(Exception):
+                    src.stop()
+            for worker in workers:
+                worker.join(timeout=5)
+            if meeting is not None:
+                # never went live, so at most a fraction of a second was captured: the user
+                # saw a failed Start, not a meeting
+                self.store.delete(meeting.id)
+            self.sink.log("warn", f"Failed to start: {e}")
+            with self._op_lock:
+                self._phase = "idle"
+                self.sink.status("idle", None)
+            self._arm_idle_unload()  # whatever did load before the failure
+        else:  # live: notices only, outside the try so they can't tear down a running run
             self.sink.log("info", f"Listening: {' + '.join(s.label for s in sources)}")
             if any(isinstance(s, SystemAudioSource) for s in sources):
                 self.sink.log(
@@ -309,12 +458,6 @@ class Session:
                     "If system audio stays empty, Terminal likely lacks System Audio "
                     "Recording permission — see README.",
                 )
-        except Exception as e:  # noqa: BLE001 -- any failure must not leave a half-started run
-            self.sink.log("warn", f"Failed to start: {e}")
-            self.sink.status("idle", None)
-            self._meeting = None
-            with self._op_lock:
-                self._running = False
 
     def _stop_impl(self) -> None:
         for src in self._sources:
@@ -323,6 +466,13 @@ class Session:
             worker.join(timeout=15)
             if worker.is_alive():
                 self.sink.log("warn", f"ASR worker '{worker.label}' did not finish in time.")
+        # the last finals were only just handed to the translator: let it catch up before
+        # closing the meeting, or those lines would be saved without their translation
+        tr = self._translator
+        if self._meeting is not None and tr is not None \
+                and not tr.drain(timeout=config.WEB_STOP_DRAIN_SEC) and tr.is_alive():
+            self.sink.log("warn", "Translation was still catching up; the last lines were "
+                                  "saved without it.")
         if self._meeting is not None:
             self._meeting.finalize(datetime.now().isoformat())
             meta = dict(self._meeting.meta)  # snapshot before clearing, for the central sync
@@ -330,8 +480,11 @@ class Session:
             self._sync_meeting(meta)
         self._sources = []
         self._workers = []
-        # idle: the just-ended meeting is now saved; the browser refetches the list
-        self.sink.status("idle", None)
+        with self._op_lock:
+            self._phase = "idle"
+            # idle: the just-ended meeting is now saved; the browser refetches the list
+            self.sink.status("idle", None)
+        self._arm_idle_unload()
 
     def _sync_meeting(self, meta: dict) -> None:
         """Push a finished meeting to the central server (best-effort, in the background).
@@ -388,15 +541,47 @@ class Session:
             return False  # refuse to delete the meeting currently being recorded
         return self.store.delete(mid)
 
+    # --- glossary: names / jargon for recognition and translation (glossary.py) ---
+    def glossary(self) -> dict:
+        return {"text": self._glossary_text, "terms": len(self._glossary)}
+
+    def set_glossary(self, text: str) -> dict:
+        """Save the page's glossary and use it right away: a recording in progress picks it up
+        from its next sentence (qwen3 recognition, and translation)."""
+        self._glossary_text = text
+        self._glossary = glossary.parse(text)
+        if self._glossary_path is not None:
+            self._glossary_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            tmp = self._glossary_path.with_suffix(".tmp")
+            tmp.write_text(text, encoding="utf-8")
+            os.replace(tmp, self._glossary_path)
+        self._apply_glossary()
+        return {"ok": True, "terms": len(self._glossary)}
+
+    def _apply_glossary(self) -> None:
+        rec, tr = self._recognizer, self._translator
+        if hasattr(rec, "set_context"):  # qwen3 only: nemotron has no biasing input
+            rec.set_context(glossary.asr_context(self._glossary))
+        if tr is not None:
+            tr.set_glossary(self._glossary)
+
     def shutdown(self) -> None:
-        """Server exit: stop the run (if any) and tear down every warm translator thread."""
-        if self._running:
-            with self._op_lock:
-                self._running = False
+        """Server exit: finish the run (if any) and tear down the warm translator thread."""
+        with self._op_lock:
+            phase = self._phase
+            if phase == "starting":
+                self._cancel_start = True  # the (daemon) start thread backs out on its own
+            elif phase == "listening":
+                self._phase = "stopping"
+            self._cancel_idle_unload()
+        if phase == "listening":
             self._stop_impl()
-        for tr in self._translators.values():
-            tr.stop()
-            tr.join(timeout=10)
+        elif phase == "stopping" and self._stop_thread is not None:
+            # a Stop already in flight: let it close the meeting before the process exits
+            self._stop_thread.join(timeout=config.WEB_STOP_DRAIN_SEC + 20)
+        if self._translator is not None:
+            self._translator.stop()
+            self._translator.join(timeout=10)
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -439,7 +624,30 @@ class _Handler(BaseHTTPRequestHandler):
         except json.JSONDecodeError:
             return {}
 
+    def _request_allowed(self, *, writes: bool) -> bool:
+        """Only this machine's own page may use the API. Any website the user visits can
+        send requests to 127.0.0.1, so without these checks one could silently POST /start
+        (record the microphone) or rewrite notes, and a DNS-rebinding page (its own domain
+        re-pointed at 127.0.0.1) could read every meeting. The Host must be localhost or an
+        IP literal -- rebinding needs a domain name -- and a browser's state-changing request
+        must come from this same origin (non-browser clients send no Origin header)."""
+        host = (self.headers.get("Host") or "").strip()
+        name = host[1:].split("]", 1)[0] if host.startswith("[") else host.rsplit(":", 1)[0]
+        if name != "localhost":
+            try:
+                ipaddress.ip_address(name)
+            except ValueError:
+                self._send_json({"error": "forbidden host"}, status=403)
+                return False
+        origin = self.headers.get("Origin")
+        if writes and origin is not None and origin != f"http://{host}":
+            self._send_json({"error": "cross-origin request refused"}, status=403)
+            return False
+        return True
+
     def do_GET(self) -> None:  # noqa: N802
+        if not self._request_allowed(writes=False):
+            return
         path = self.path.split("?", 1)[0]
         if path in ("/", "/index.html"):
             self._serve_html()
@@ -449,6 +657,8 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_json(self._session.state())
         elif path == "/meetings":
             self._send_json({"meetings": self._store.list()})
+        elif path == "/glossary":
+            self._send_json(self._session.glossary())
         elif path == "/search":
             from urllib.parse import parse_qs, urlparse
 
@@ -464,11 +674,15 @@ class _Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         body = self._body_json(self._read_body())  # always drain the body (keep-alive safety)
+        if not self._request_allowed(writes=True):
+            return
         path = self.path.split("?", 1)[0]
         if path == "/start":
             self._send_json(self._session.start(body.get("source", "both"), body.get("lang")))
         elif path == "/stop":
             self._send_json(self._session.stop())
+        elif path == "/glossary":
+            self._send_json(self._session.set_glossary(str(body.get("text", ""))))
         elif path.startswith("/meetings/") and path.endswith("/rename"):
             ok = self._session.rename_meeting(path.split("/")[2], body.get("title", ""))
             self._send_json({"ok": ok}, 200 if ok else 404)
@@ -480,6 +694,8 @@ class _Handler(BaseHTTPRequestHandler):
 
     def do_DELETE(self) -> None:  # noqa: N802
         self._read_body()  # drain any body for keep-alive safety
+        if not self._request_allowed(writes=True):
+            return
         path = self.path.split("?", 1)[0]
         if path.startswith("/meetings/"):
             ok = self._session.delete_meeting(path.split("/")[2])
@@ -562,6 +778,14 @@ class _StderrTee:
 
     def __getattr__(self, name):  # noqa: ANN001 -- delegate isatty/encoding/etc.
         return getattr(self._real, name)
+
+
+def _free_mlx_memory() -> None:
+    """Hand the memory of just-dropped models back to the OS: collect the dropped objects
+    (module trees and the closures around them can form reference cycles), then empty
+    MLX's buffer cache, which otherwise keeps freed Metal buffers for reuse."""
+    gc.collect()
+    mx.clear_cache()
 
 
 def _dir_bytes(root: Path) -> int:
@@ -679,6 +903,11 @@ def main(
     context: int = typer.Option(
         config.MT_CONTEXT_SENTENCES, help="Prior sentences as translation context (0=off)"
     ),
+    idle_unload: float = typer.Option(
+        config.WEB_IDLE_UNLOAD_MIN, "--idle-unload", metavar="MINUTES",
+        help="Free the models after this many idle minutes; the next Start reloads them in "
+        "seconds (0 = keep them loaded)",
+    ),
     audiotee: str | None = typer.Option(None, help="Path to the audiotee binary"),
     sync_url: str | None = typer.Option(
         None, "--sync-url",
@@ -712,6 +941,8 @@ def main(
         audiotee_path=audiotee,
         sync_url=sync_url,
         sync_token=sync_token,
+        idle_unload_min=idle_unload,
+        glossary_path=_GLOSSARY_FILE,
     )
 
     # surface the deep-in-the-stack system-audio silence warning to the browser banner
@@ -733,6 +964,15 @@ def main(
         )
     if open_browser:
         threading.Timer(0.5, lambda: webbrowser.open(url)).start()
+
+    def _on_sigterm(*_: object) -> None:
+        # The menu-bar app's Quit / Restart (and logout) end the engine with SIGTERM, whose
+        # default action kills the process on the spot: the meeting being recorded never got
+        # closed and its in-flight sentence and pending translations were lost. Take the
+        # same graceful path as Ctrl-C instead.
+        raise KeyboardInterrupt
+
+    signal.signal(signal.SIGTERM, _on_sigterm)
 
     try:
         server.serve_forever()

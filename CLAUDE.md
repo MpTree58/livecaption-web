@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 项目定位
 
-livecaption 是 macOS（Apple Silicon）本地实时英文转录 + 中文翻译的命令行工具，无 UI。ASR 用 mlx-audio 跑 NVIDIA `nemotron-3.5-asr-streaming-0.6b`（cache-aware 真流式 transducer），端点检测用 Silero VAD（mlx 版）；翻译用 mlx-lm 跑腾讯混元 `Hy-MT2`。两者都走 Apple GPU/MLX、共享统一内存——VAD 把静音段挡在 encoder 外省 GPU。**全进程 mx 求值都过 `runtime.MLX_LOCK` 串行化**（MLX 多线程并发求值无官方保证）：ASR 侧整段计算持锁（毫秒级），翻译侧用 `stream_generate` 逐 decode step 取锁——既保证线程安全，又不让一次翻译把 partial 冻住数秒。
+livecaption 是 macOS（Apple Silicon）本地实时英文转录 + 中文翻译工具：命令行（`cli.py`）+ 本地网页端（`webapp.py`，见下方「网页端」）+ 菜单栏 App（`menubar.py`，托管网页端引擎进程）。ASR 用 mlx-audio 跑 NVIDIA `nemotron-3.5-asr-streaming-0.6b`（cache-aware 真流式 transducer），端点检测用 Silero VAD（mlx 版）；翻译用 mlx-lm 跑腾讯混元 `Hy-MT2`。两者都走 Apple GPU/MLX、共享统一内存——VAD 把静音段挡在 encoder 外省 GPU。**全进程 mx 求值都过 `runtime.MLX_LOCK` 串行化**（MLX 多线程并发求值无官方保证）：ASR 侧整段计算持锁（毫秒级），翻译侧用 `stream_generate` 逐 decode step 取锁——既保证线程安全，又不让一次翻译把 partial 冻住数秒。
 
 ## 常用命令
 
@@ -19,9 +19,21 @@ bash scripts/build_audiotee.sh               # 编译系统音频捕获二进制
 uv run python scripts/smoke_asr.py           # ASR 端到端：加载模型 + 解码自带 test wav，对照离线结果
 uv run python scripts/smoke_translate.py     # 翻译端到端
 uv run python scripts/smoke_diff.py          # _inline_diff 纯逻辑测试（无模型，秒级）
+uv run python scripts/smoke_glossary.py      # 术语表解析 / 词条方向纯逻辑测试（无模型，秒级）
 uv run python scripts/smoke_mel.py           # 增量 mel 与整句一次性计算的一致性（改 _mel_grow 后必跑）
 uv run python scripts/diag_system_audio.py   # 系统音频 / 权限自检（播放声音看能否捕获到非零数据）
+uv run --extra qwen python scripts/smoke_model_swap.py  # 网页端切换语言预设后旧模型是否释放（真模型 + say 合成音频冒充麦克风，临时会议库）
+uv run python scripts/smoke_web_session.py   # 网页端 start/stop 边界情况（Stop 不丢最后几句翻译等；同上用合成音频）
+uv run python scripts/smoke_web_sigterm.py   # 录音中 SIGTERM（菜单栏 Quit/Restart）能正常结束会议
+uv run python scripts/smoke_web_guard.py     # 本地 API 拒绝其他网站请求（CSRF / DNS rebinding；无模型，秒级）
+uv run --extra qwen python scripts/smoke_qwen.py Six666/mlx-qwen3-asr-1.7b-8bit  # 网页端用的 qwen3 模型（默认参数用 0.6B）
 uvx ruff check .                             # lint（规则集见 pyproject）
+
+# 网页端手动联调：真模型 + 音频文件冒充麦克风/系统音频（实时播放、循环），会议存临时目录
+uv run --extra qwen python scripts/demo_web.py speech.wav --them other.wav --port 8766 --no-open
+# 准确率对比（调参前后都跑；数据集需自备，见脚本 docstring）
+uv run --extra qwen python scripts/eval_asr.py DATA_DIR --engine qwen   # 同一引擎不同设置的混合错误率
+uv run python scripts/eval_mt.py SRC --target zh-cn --out PREFIX        # 翻译模版/解码设置，配 sacrebleu --paired-bs 打分
 ```
 
 ## 架构：三阶段线程流水线
@@ -38,6 +50,7 @@ AudioSource(后台)  ──queue──▶  AsrWorker(线程)  ──final 句─
 - **`audio.py`** — `MicSource`(sounddevice 回调)、`SystemAudioSource`(读 audiotee 子进程 stdout)、`FileSource`(解码音频文件)，统一把 16k float32 mono chunk 放进 `self.queue`，流结束放 `SENTINEL`。实时源绝不阻塞（队列满了丢帧）；**FileSource 例外：阻塞 put 不丢帧**（无实时性约束，端点检测数 VAD 帧不依赖墙钟）。`SystemAudioSource` 有 supervisor 线程做断流看门狗：健康的 tap 静音时也持续输出零字节流，**完全无数据 ≥5s（`SYSTEM_AUDIO_STALL_SEC`）= tap 已死**（实测诱因：切换默认输出设备，音频在新设备继续播、tap 还挂在旧设备上 IO 停转），此时杀掉重启 audiotee 重新 tap 当前设备，字幕自动恢复——曾因纯阻塞 read 静默饿死整条流水线且无任何提示。
 - **`asr.py`** — `Recognizer`(共享权重) + `OnlineStream`(单流状态机：Silero VAD 判开口/静音，push 式增量 encoder + RNNT 解码) + `AsrWorker`(消费队列、把事件转回调)。发两种事件：`on_partial`(中间结果，随说话变) 和 `on_final`(端点后定稿)。diarize（默认开）时一句可能切成多个 final（每说话人一段），label 带 `#S1` 后缀。
 - **`translate.py`** — `Translator` 后台加载 Hy-MT2，**只翻译 final 句**。翻译堵塞绝不反压音频（积压 ≥10 句时向 stderr 告警一次）。`context_size>0` 时用最近 N 句原文做翻译背景。生成用 `stream_generate` 手动驱动、每个 decode step 取一次 `runtime.MLX_LOCK`。模型加载失败会打印 "translation disabled" 并退出线程，转录照常。输出侧有三道防护（都不改官方 prompt 模版）：(1) 源句 < `MT_CONTEXT_MIN_WORDS` 词时不带上下文（碎片输入易让模型转去翻背景块）；(2) `_strip_boilerplate` 剥掉 "根据背景信息，以下是译文：" 这类元文本前缀；(3) 上下文回声检测（译文与上一句译文的字符 bigram 重合 ≥45% = 模型翻了背景而非原文，实测阈值能区分劫持与同话题相邻句），命中则去掉上下文重翻一次。
+- **`glossary.py`** — 术语表（每行 `术语` 或 `术语 = 译法`）。识别端：`asr_context` 拼成空格分隔的词串给 qwen3 的 `context`（nemotron 无此能力）；**只用于定稿的 two-pass 整句重解，流式会话不能带**——mlx-qwen3-asr 的滚动流式解码带 context 时会把整份术语表"念"进 partial（实测），离线整句解码不会。翻译端：`translation_pairs` 按句挑出出现的词条、按目标语言定方向（同一词条中↔英两用；拉丁字母术语译成中文时默认原样保留），命中的句子改用 README 官方术语模板（`TRANSLATE_PROMPT_TERMS*`，官方没有术语+背景的组合模板，所以这类句子不带上下文）。网页端存 `~/.cache/livecaption/glossary.txt`，保存即对进行中的录音生效（下一句起）。
 - **`runtime.py`** — 进程级 `MLX_LOCK`（中立归属，asr 和 translate 都 import 它，谁也不依赖谁）。
 - **`render.py`** — `Renderer`(rich.Live 终端，底部活动区刷 partial、上方滚动 final) + `FileWriter`(追加写文件)。配色按 `--theme`(auto/light/dark) 分三套：单套固定色总会在某种背景下隐身，所以**只有译文真正随背景变**(default=默认前景+加粗"不赌颜色"，dark=亮青，light=深青蓝)，其余元素用对两种背景都中性可见的固定样式(grey50 中灰、说话人调色板)——**一律不用 `dim`**(dim 相对背景降亮度，两种背景都偏淡，正是用户反馈"看不清"的根因)。说话人 S1–S4 各一色(`_SPEAKER_PALETTE`，按主题分套且刻意避开青系以防与译文撞色、避开绿系以防与 diff 新词撞色；S1 品红/S2 蓝/S3 橙/S4 红跨主题保持同色相)。diff 配色：纠掉的词用中灰删除线（被取代的内容不该比正文显眼；红色曾与 S4 标签混淆），新词绿色。auto 从 `COLORFGBG` 末段探测背景，探测不到回退 default。
 - **`cli.py`** — 装配层：解析参数 → 建音频源 → 每个源一个 recognizer + AsrWorker → 回调接到 renderer/writer/translator → 等 Ctrl-C。
@@ -66,7 +79,16 @@ AudioSource(后台)  ──queue──▶  AsrWorker(线程)  ──final 句─
 - **系统音频全静音 = TCC 权限问题，不是 bug**。audiotee 裸二进制经子进程启动，macOS 几乎不弹授权窗；没授权时 Core Audio **静默返回静音流**（有字节、全 0、不报错）。`SystemAudioSource` 连续约 8 秒全 0 会打印警告。解法见 README 权限一节（手动授权 + 重启终端）。**macOS 15 (Sequoia) 起「屏幕与系统录制」分上下两子区**：audiotee 只做音频 tap，必须加到下方 **「仅系统音频录制」(System Audio Recording Only)** 子区，加到顶部那个子区会照样全 0 静音（macOS 14 单列表无此区分）——此细节 audiotee README 没写，出处是作者在 [audiotee#7](https://github.com/makeusabrew/audiotee/issues/7) 的回复。
 - **audiotee 需从源码编译**（Swift，无 brew/无预编译）。`scripts/build_audiotee.sh` 克隆 + `swift build` 到 `./bin/audiotee`；`models.resolve_audiotee` 按 显式路径 > `./bin` > PATH 查找。
 
+## 网页端（`webapp.py` / `websink.py` / `webui.html` / `meetings.py`）
+
+- **会话生命周期是显式四阶段** `idle → starting → listening → stopping → idle`（`Session._phase`，`_op_lock` 保护）：只有 idle 才接受 Start；starting 中点 Stop = 取消（启动线程在两次下载之间、每次加载之后和 commit 点检查 `_cancel_start` 退出）。"建音源 + 建会议 + 起 worker + 进 listening" 在锁内一次完成，所以 Stop 要么落在它之前（干净退出、不建会议），要么落在它之后（正常停止）。启动中途失败必须拆掉已启动的音源 / worker 并删掉刚建的会议——both 模式下 audiotee 失败时麦克风已经在录，曾经会一直录进一个界面上停不掉的会议。
+- **模型内存**：只保留当前预设的 recognizer，换预设**先释放再加载**（`gc.collect()` + `mx.clear_cache()`；不清 MLX 缓存，内存不会还给系统）；qwen3 的语言只是解码参数，不进缓存 key，用 `set_language` 切换，中文 / 中英混合 / English (accurate) 共用一个模型。翻译器全局只有一个，`reset_context(target)` 经队列切换方向——别再按方向缓存多个 Translator，每个都是一份完整权重。停止录制后 `WEB_IDLE_UNLOAD_MIN`（默认 5 分钟）卸载全部模型。改这块用 `scripts/smoke_model_swap.py` 量。
+- **Stop 要等翻译追上**（`Translator.drain`，上限 `WEB_STOP_DRAIN_SEC`）再关会议，否则最后几句的译文到达时会议已关闭、不入库。**SIGTERM 等同 Ctrl-C**：菜单栏 Quit / Restart 用 SIGTERM 结束引擎，`main` 里转成 KeyboardInterrupt 走 `session.shutdown()`；菜单栏的等待时长要覆盖这个 drain。
+- **本地 API 只接受本页面**：Host 必须是 localhost 或 IP 字面量（防 DNS rebinding），写请求若带 Origin（浏览器都会带）必须同源（防 CSRF——任何网站都能向 127.0.0.1 发 text/plain 的 `POST /start` 偷偷开麦）。新写接口放进 `do_POST` / `do_DELETE` 即自动受保护；`scripts/smoke_web_guard.py` 覆盖。
+- **页面的 live 视图只含连上 SSE 之后收到的事件**：打开 / 重连到正在录的会议时 `mergeSavedIntoLive` 按 key 把已保存的句子补进来（按保存顺序插入）。服务端在（重）连接时会重放 status，页面只在"新录音开始"时跳到 live，重放不能把用户从别的会议拽回来。diff 永远渲染，开关只切 `.nodiff` 样式。
+- **mlx-qwen3-asr 的两个包内坑（升级前复查）**：(1) 模块级 `transcribe(model=<已加载对象>)` 用包默认 `Qwen/Qwen3-ASR-0.6B` 的 tokenizer——会在 MLX_LOCK 内下载那个 1.8GB 的整库，离线时则静默失败。所以二次解码走绑定当前模型的 `Session`，`finish_streaming` 的 tail refine 在开 two-pass 时关掉（它也走那个 transcribe）；`smoke_qwen.py` 断言解码过程不解析任何 HF 仓库。(2) 流式会话带 `context` 会把术语表"念"进 partial，所以术语只给定稿的二次解码。
+
 ## 约定
 
 - **运行时面向用户的文案用英文**（console 输出、CLI `--help`、异常消息、脚本 print）；**代码注释和 docstring 也用英文**（2026-06 起为面向国际开源从中文改为英文；本 `CLAUDE.md` 作为内部开发指导保留中文，README 为中文主版 + `README.en.md` 英文版）。
-- **翻译 prompt 完全遵循 Hy-MT2 官方 README 模版**（`config.py` 的 `TRANSLATE_PROMPT` / `TRANSLATE_PROMPT_WITH_CONTEXT`），不要自创加约束；采样参数也是官方推荐值，勿随意改。带上下文时前文用**空格**拼接（不是换行），因为端点切出的"句子"常是连续语流的片段。对模型输出缺陷的纠正一律放在**输出后处理**（`translate.py` 的 boilerplate 剥离 / 上下文回声重翻 / 短碎片降级为无上下文模版），不动 prompt 本身。
+- **翻译 prompt 完全遵循 Hy-MT2 官方 README 模版**（`config.py` 的 `TRANSLATE_PROMPT` / `TRANSLATE_PROMPT_WITH_CONTEXT`，以及 README 给出的中文版 `*_ZH`），不要自创加约束；**按目标语言选模版**：译成中文用中文版（中文语言名），译成其他语言用英文版——这是实测结论（`scripts/eval_mt.py`：英→中带上下文 WMT20 37.6→40.8、TED 26.1→29.2 BLEU；中→英用中文版反而 29.7→25.6），改模版前先用它重测。采样参数也是官方推荐值，勿随意改（实测贪心解码无差别）。带上下文时前文用**空格**拼接（不是换行），因为端点切出的"句子"常是连续语流的片段。对模型输出缺陷的纠正一律放在**输出后处理**（`translate.py` 的 boilerplate 剥离 / 上下文回声重翻 / 短碎片降级为无上下文模版），不动 prompt 本身。

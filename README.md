@@ -32,6 +32,12 @@ curl -LsSf https://raw.githubusercontent.com/MpTree58/livecaption-web/main/scrip
 
 它会自动装好一切并创建 `/Applications/livecaption.app`（默认随登录自启，`| bash -s -- --no-login` 可关；`--uninstall` 卸载）。之后点菜单栏 🎙 → "Open livecaption" 就能录制和浏览会议。
 
+常驻不等于一直占内存：网页端只保留当前语言预设的模型（英文约 3.5GB、中文/中英混合约 4.7GB 统一内存，切换语言会先释放上一套），停止录制 5 分钟后自动全部释放，下次点 Start 再从磁盘缓存加载（几秒）。时长用 `livecaption-web --idle-unload 分钟数` 调整，`0` 为不释放。
+
+语言预设里的 **English (accurate) → 中文** 用 Qwen3-ASR 转写英文：实测错误率明显更低（母语者朗读 5.4%→3.7%，中国口音的口语英文 26.2%→17.0%，见 `scripts/eval_asr.py`），代价是实时字幕约每 2 秒刷新一次（默认的 English 是逐词刷新）、一句话只标一个说话人、内存多约 1.2GB。和中文/中英混合预设共用同一个模型，互相切换不用重新加载。
+
+**术语表**（网页右上角 Glossary，CLI 用 `--glossary FILE`）：每行一个人名/产品名/行话，如 `Flander`、`MPPS`；写成 `联调 = integration testing` 可以固定译法（中→英、英→中都适用）。识别端只对 Qwen3 系预设（中文、中英混合、English (accurate)）生效：定稿时用术语重新解码，实测把「和 Flender 再连调」纠正为「和 Flander 再联调」、「MPTS…Superbase」纠正为「MPPS…Supabase」；翻译端对所有预设生效：含术语的句子改用 Hy-MT2 官方的术语模板，英文人名默认保持原样（「Andy」不会被译成「安迪」）。保存后从下一句开始生效，录音中途也可以改。
+
 命令行手动安装：
 
 ```bash
@@ -63,6 +69,9 @@ uv run --extra qwen livecaption --source file --file podcast.mp3 --out podcast.m
 
 # 翻译默认带前 3 句上下文（提升代词指代/术语连贯）；如需关闭或调整：
 uv run livecaption --source system --context 0
+
+# 术语表：人名、产品名、行话（每行一个，`术语 = 译法` 可固定译法，见下方「术语表」）
+uv run --extra qwen livecaption --asr-model qwen3-1.7b-8bit --asr-lang Chinese --glossary terms.txt
 
 # 只转录不翻译
 uv run livecaption --source mic --no-translate

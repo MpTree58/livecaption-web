@@ -22,7 +22,13 @@ import urllib.error
 import urllib.request
 import webbrowser
 
+from .config import WEB_STOP_DRAIN_SEC
+
 DEFAULT_PORT = 8000
+# How long Quit / Restart wait for the engine to exit on SIGTERM before killing it. An idle
+# engine exits at once; a recording is stopped like the Stop button (last sentence flushed,
+# pending translations drained for up to WEB_STOP_DRAIN_SEC, meeting closed).
+_ENGINE_STOP_TIMEOUT = WEB_STOP_DRAIN_SEC + 20
 
 
 def _pick_port(preferred: int) -> int:
@@ -69,7 +75,7 @@ class EngineSupervisor:
         if self._proc is not None and self._proc.poll() is None:
             self._proc.terminate()
             try:
-                self._proc.wait(timeout=8)
+                self._proc.wait(timeout=_ENGINE_STOP_TIMEOUT)
             except subprocess.TimeoutExpired:
                 self._proc.kill()
         self._proc = None

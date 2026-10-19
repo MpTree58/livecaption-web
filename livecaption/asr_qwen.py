@@ -22,9 +22,10 @@ breaks the rolling decode can insert), and the inline diff vs the streaming text
 nemotron's (CJK-aware, see asr.py:_inline_diff). See asr.py for the nemotron backend.
 
 `mlx-qwen3-asr` is an optional dependency (the `[qwen]` extra); it is imported lazily so a
-nemotron-only install never needs it. Model weights load once (process-local LRU cache in
-the package, plus we pass the loaded model object into every feed/finish call) so no
-per-utterance reload.
+nemotron-only install never needs it. Model weights load once: we keep the loaded model
+object, pass it into every feed/finish call, and run offline re-decodes through a
+`Session` bound to it -- so no per-utterance reload, and nothing parked in the package's
+process-global model cache (dropping the recognizer really frees the weights).
 """
 
 from __future__ import annotations
@@ -75,6 +76,17 @@ def _resolve_qwen_language(language: str | None) -> str | None:
     # Pass an unrecognized value through title-cased; the package validates and the spoken
     # language is the user's call (mirrors nemotron letting the model list its locales).
     return language.strip().title()
+
+
+def _tail_refine() -> bool:
+    """Whether finish_streaming may run its "accuracy" tail refine. It kicks in when the last
+    chunk's decode adds no text (e.g. an utterance's trailing silence) and re-decodes that
+    window through the package's module-level transcribe(model=<loaded object>), which --
+    like the old two-pass did -- takes its tokenizer from the package default
+    Qwen/Qwen3-ASR-0.6B (snapshot_download of that whole 1.8 GB repo, inside MLX_LOCK) and
+    decodes without the forced language. The two-pass re-decodes the whole utterance anyway,
+    so the refine only runs without it."""
+    return not config.QWEN_TWO_PASS
 
 
 def _word_offsets(words: list[dict], text: str) -> list[tuple[int, int]]:
@@ -154,15 +166,24 @@ class QwenRecognizer:
         log: Callable[[str], None] | None = None,
     ):
         from mlx_audio.vad import load as load_vad
-        from mlx_qwen3_asr import load_model
+        from mlx_qwen3_asr import Session, load_model
 
         say = log or (lambda _m: None)
         self.model_id = asr_model
         self.language = _resolve_qwen_language(language)
+        # glossary biasing: space-separated terms in Qwen3-ASR's system prompt (set_context)
+        self.context = ""
         say(f"Loading ASR model {asr_model} (Qwen3-ASR via mlx-qwen3-asr) …")
         # load_model -> (model, config); keep the model object to pass into feed/finish so
         # the decoder never reloads weights between utterances.
         self.model_obj, self._model_config = load_model(asr_model)
+        # Offline re-decodes (two-pass, word timestamps) go through an explicit Session bound
+        # to this model: the module-level transcribe(model=<loaded object>) takes its
+        # tokenizer from the package default Qwen/Qwen3-ASR-0.6B instead, so the first final
+        # downloaded that whole 1.8 GB repo (while holding MLX_LOCK, freezing captions and
+        # translation) and, offline, made every two-pass silently fall back to the streaming
+        # text. Session reads the tokenizer from this model's own snapshot.
+        self.session = Session(self.model_obj)
         say(f"Loading VAD model {config.VAD_MODEL} …")
         self.vad = load_vad(config.VAD_MODEL)
         # Sortformer for diarization (it loads via the VAD loader too).
@@ -198,6 +219,7 @@ class QwenRecognizer:
                 max_context_sec=config.QWEN_MAX_CONTEXT_SEC,
                 language=self.language,
                 finalization_mode=config.QWEN_FINALIZATION_MODE,
+                enable_tail_refine=_tail_refine(),
             )
             state.forced_language = self.language
             state = feed_audio(silence, state, model=self.model_obj)
@@ -220,6 +242,19 @@ class QwenRecognizer:
                 with contextlib.suppress(Exception):
                     self.aligner.align(silence, "hello", self.language or "English")
         mx.clear_cache()
+
+    def set_language(self, language: str) -> None:
+        """Switch the spoken language for streams created from now on. For Qwen3-ASR the
+        language is only a decode-time prompt, so presets that differ in nothing else share
+        one loaded model instead of reloading the same weights."""
+        self.language = _resolve_qwen_language(language)
+
+    def set_context(self, context: str) -> None:
+        """Bias the final (two-pass) decode toward these space-separated terms
+        (glossary.asr_context) -- the package's documented `context` input, the decode's system
+        prompt. Takes effect from the next utterance; "" turns it off. Partials stay unbiased
+        (see QwenOnlineStream._new_state), and without two-pass there is nothing to bias."""
+        self.context = context
 
     def create_stream(self) -> QwenOnlineStream:
         return QwenOnlineStream(self)
@@ -267,14 +302,13 @@ class QwenOnlineStream:
     """
 
     def __init__(self, rec: QwenRecognizer):
-        from mlx_qwen3_asr import transcribe
         from mlx_qwen3_asr.streaming import feed_audio, finish_streaming, init_streaming
 
         self._rec = rec
         self._init_streaming = init_streaming
         self._feed_audio = feed_audio
         self._finish_streaming = finish_streaming
-        self._transcribe = transcribe
+        self._transcribe = rec.session.transcribe  # see QwenRecognizer.session
         self._aligner = rec.aligner  # None unless word-level diarization is enabled
         self._vad = rec.vad
         self._vad_state = rec.vad.initial_state(sample_rate=config.SAMPLE_RATE)
@@ -373,12 +407,17 @@ class QwenOnlineStream:
     # ---- decode ----
 
     def _new_state(self):
+        # No glossary context here: the rolling streaming decode recites it -- a live line
+        # read "我们下午和 Flander Andy MPPS Supabase PRD 联调 integration testing 工单 ticket。"
+        # with the glossary as context (the offline re-decode doesn't). The final's two-pass
+        # re-decode applies it instead (_second_pass), so corrections show up as its diff.
         state = self._init_streaming(
             model=self._rec.model_id,
             chunk_size_sec=config.QWEN_CHUNK_SIZE_SEC,
             max_context_sec=config.QWEN_MAX_CONTEXT_SEC,
             language=self._rec.language,
             finalization_mode=config.QWEN_FINALIZATION_MODE,
+            enable_tail_refine=_tail_refine(),
         )
         state.forced_language = self._rec.language
         return state
@@ -549,14 +588,14 @@ class QwenOnlineStream:
                 if want_words:
                     result = self._transcribe(
                         audio,
-                        model=self._rec.model_obj,
                         language=self._rec.language,
+                        context=self._rec.context,
                         return_timestamps=True,
                         forced_aligner=self._aligner,
                     )
                 else:
                     result = self._transcribe(
-                        audio, model=self._rec.model_obj, language=self._rec.language
+                        audio, language=self._rec.language, context=self._rec.context
                     )
             text = (result.text or "").strip()
             words = getattr(result, "segments", None) if want_words else None
