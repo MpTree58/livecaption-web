@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 项目定位
 
-livecaption 是 macOS（Apple Silicon）本地实时英文转录 + 中文翻译的命令行工具，无 UI。ASR 用 mlx-audio 跑 NVIDIA `nemotron-3.5-asr-streaming-0.6b`（cache-aware 真流式 transducer），端点检测用 Silero VAD（mlx 版）；翻译用 mlx-lm 跑腾讯混元 `Hy-MT2`。两者都走 Apple GPU/MLX、共享统一内存——VAD 把静音段挡在 encoder 外省 GPU。**全进程 mx 求值都过 `runtime.MLX_LOCK` 串行化**（MLX 多线程并发求值无官方保证）：ASR 侧整段计算持锁（毫秒级），翻译侧用 `stream_generate` 逐 decode step 取锁——既保证线程安全，又不让一次翻译把 partial 冻住数秒。
+livecaption 是 macOS（Apple Silicon）本地实时英文转录 + 中文翻译工具：命令行（`cli.py`）+ 本地网页端（`webapp.py`，见下方「网页端」）+ 菜单栏 App（`menubar.py`，托管网页端引擎进程）。ASR 用 mlx-audio 跑 NVIDIA `nemotron-3.5-asr-streaming-0.6b`（cache-aware 真流式 transducer），端点检测用 Silero VAD（mlx 版）；翻译用 mlx-lm 跑腾讯混元 `Hy-MT2`。两者都走 Apple GPU/MLX、共享统一内存——VAD 把静音段挡在 encoder 外省 GPU。**全进程 mx 求值都过 `runtime.MLX_LOCK` 串行化**（MLX 多线程并发求值无官方保证）：ASR 侧整段计算持锁（毫秒级），翻译侧用 `stream_generate` 逐 decode step 取锁——既保证线程安全，又不让一次翻译把 partial 冻住数秒。
 
 ## 常用命令
 
@@ -24,7 +24,16 @@ uv run python scripts/smoke_mel.py           # 增量 mel 与整句一次性计�
 uv run python scripts/diag_system_audio.py   # 系统音频 / 权限自检（播放声音看能否捕获到非零数据）
 uv run --extra qwen python scripts/smoke_model_swap.py  # 网页端切换语言预设后旧模型是否释放（真模型 + say 合成音频冒充麦克风，临时会议库）
 uv run python scripts/smoke_web_session.py   # 网页端 start/stop 边界情况（Stop 不丢最后几句翻译等；同上用合成音频）
+uv run python scripts/smoke_web_sigterm.py   # 录音中 SIGTERM（菜单栏 Quit/Restart）能正常结束会议
+uv run python scripts/smoke_web_guard.py     # 本地 API 拒绝其他网站请求（CSRF / DNS rebinding；无模型，秒级）
+uv run --extra qwen python scripts/smoke_qwen.py Six666/mlx-qwen3-asr-1.7b-8bit  # 网页端用的 qwen3 模型（默认参数用 0.6B）
 uvx ruff check .                             # lint（规则集见 pyproject）
+
+# 网页端手动联调：真模型 + 音频文件冒充麦克风/系统音频（实时播放、循环），会议存临时目录
+uv run --extra qwen python scripts/demo_web.py speech.wav --them other.wav --port 8766 --no-open
+# 准确率对比（调参前后都跑；数据集需自备，见脚本 docstring）
+uv run --extra qwen python scripts/eval_asr.py DATA_DIR --engine qwen   # 同一引擎不同设置的混合错误率
+uv run python scripts/eval_mt.py SRC --target zh-cn --out PREFIX        # 翻译模版/解码设置，配 sacrebleu --paired-bs 打分
 ```
 
 ## 架构：三阶段线程流水线
@@ -69,6 +78,15 @@ AudioSource(后台)  ──queue──▶  AsrWorker(线程)  ──final 句─
 - **token 时间戳与 diar 帧同为 80ms 粒度同一时间轴**，直接对位；换人边界的句尾标点按时间戳会落进下一组，`_attribute_speakers` 里有回挂后处理。token 是 subword（词首 piece 带前导空格，整句文本就是 token 文本直接拼接），**说话人分组只允许在词首 token 处开新组**——diar 边界落在词中间时若直接切会把一个词劈进两个 final（实测出过 "used" → "u"|"sed"）。
 - **系统音频全静音 = TCC 权限问题，不是 bug**。audiotee 裸二进制经子进程启动，macOS 几乎不弹授权窗；没授权时 Core Audio **静默返回静音流**（有字节、全 0、不报错）。`SystemAudioSource` 连续约 8 秒全 0 会打印警告。解法见 README 权限一节（手动授权 + 重启终端）。**macOS 15 (Sequoia) 起「屏幕与系统录制」分上下两子区**：audiotee 只做音频 tap，必须加到下方 **「仅系统音频录制」(System Audio Recording Only)** 子区，加到顶部那个子区会照样全 0 静音（macOS 14 单列表无此区分）——此细节 audiotee README 没写，出处是作者在 [audiotee#7](https://github.com/makeusabrew/audiotee/issues/7) 的回复。
 - **audiotee 需从源码编译**（Swift，无 brew/无预编译）。`scripts/build_audiotee.sh` 克隆 + `swift build` 到 `./bin/audiotee`；`models.resolve_audiotee` 按 显式路径 > `./bin` > PATH 查找。
+
+## 网页端（`webapp.py` / `websink.py` / `webui.html` / `meetings.py`）
+
+- **会话生命周期是显式四阶段** `idle → starting → listening → stopping → idle`（`Session._phase`，`_op_lock` 保护）：只有 idle 才接受 Start；starting 中点 Stop = 取消（启动线程在两次下载之间、每次加载之后和 commit 点检查 `_cancel_start` 退出）。"建音源 + 建会议 + 起 worker + 进 listening" 在锁内一次完成，所以 Stop 要么落在它之前（干净退出、不建会议），要么落在它之后（正常停止）。启动中途失败必须拆掉已启动的音源 / worker 并删掉刚建的会议——both 模式下 audiotee 失败时麦克风已经在录，曾经会一直录进一个界面上停不掉的会议。
+- **模型内存**：只保留当前预设的 recognizer，换预设**先释放再加载**（`gc.collect()` + `mx.clear_cache()`；不清 MLX 缓存，内存不会还给系统）；qwen3 的语言只是解码参数，不进缓存 key，用 `set_language` 切换，中文 / 中英混合 / English (accurate) 共用一个模型。翻译器全局只有一个，`reset_context(target)` 经队列切换方向——别再按方向缓存多个 Translator，每个都是一份完整权重。停止录制后 `WEB_IDLE_UNLOAD_MIN`（默认 5 分钟）卸载全部模型。改这块用 `scripts/smoke_model_swap.py` 量。
+- **Stop 要等翻译追上**（`Translator.drain`，上限 `WEB_STOP_DRAIN_SEC`）再关会议，否则最后几句的译文到达时会议已关闭、不入库。**SIGTERM 等同 Ctrl-C**：菜单栏 Quit / Restart 用 SIGTERM 结束引擎，`main` 里转成 KeyboardInterrupt 走 `session.shutdown()`；菜单栏的等待时长要覆盖这个 drain。
+- **本地 API 只接受本页面**：Host 必须是 localhost 或 IP 字面量（防 DNS rebinding），写请求若带 Origin（浏览器都会带）必须同源（防 CSRF——任何网站都能向 127.0.0.1 发 text/plain 的 `POST /start` 偷偷开麦）。新写接口放进 `do_POST` / `do_DELETE` 即自动受保护；`scripts/smoke_web_guard.py` 覆盖。
+- **页面的 live 视图只含连上 SSE 之后收到的事件**：打开 / 重连到正在录的会议时 `mergeSavedIntoLive` 按 key 把已保存的句子补进来（按保存顺序插入）。服务端在（重）连接时会重放 status，页面只在"新录音开始"时跳到 live，重放不能把用户从别的会议拽回来。diff 永远渲染，开关只切 `.nodiff` 样式。
+- **mlx-qwen3-asr 的两个包内坑（升级前复查）**：(1) 模块级 `transcribe(model=<已加载对象>)` 用包默认 `Qwen/Qwen3-ASR-0.6B` 的 tokenizer——会在 MLX_LOCK 内下载那个 1.8GB 的整库，离线时则静默失败。所以二次解码走绑定当前模型的 `Session`，`finish_streaming` 的 tail refine 在开 two-pass 时关掉（它也走那个 transcribe）；`smoke_qwen.py` 断言解码过程不解析任何 HF 仓库。(2) 流式会话带 `context` 会把术语表"念"进 partial，所以术语只给定稿的二次解码。
 
 ## 约定
 
